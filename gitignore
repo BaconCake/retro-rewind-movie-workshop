@@ -1,0 +1,26 @@
+# Build output
+dist/
+build/
+*.spec
+
+# PyInstaller
+__pycache__/
+*.pyc
+
+# User data (created at runtime)
+config.json
+custom_slots.json
+replacements.json
+title_changes.json
+base_slot_edits.json
+edited_slots.json
+shipped_slots.json
+Output/
+
+# Third-party tools (not our code)
+repak.exe
+texconv.exe
+
+# OS files
+Thumbs.db
+.DS_Store
