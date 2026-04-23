@@ -66,28 +66,88 @@ ROW KEY FIELDS [0:8] -- CRITICAL, READ CAREFULLY:
       Setting [4:8] to 0 makes all rows invisible -- FModel shows 0 rows.
       This bug was hit in April 2026 and cost significant debugging time.
 
-ROW DATA FIELDS [8:row_size]:
+ROW DATA FIELDS — THREE SCHEMA VERSIONS (verified from base game binary, April 2026):
+
+  The Film_DataStructure declares fields (ProductName, SubjectImage, BackgroundImage,
+  SubjectName, Genre, SubjectPlacement, LayoutStyle, LayoutStyleColor, ColorPalette,
+  SKU, NewToUnlock) but the actual serialized data in cooked DataTable uexps uses
+  three DIFFERENT layouts depending on when the DataTable was cooked:
+
+  V1 — WESTERN only (71 bytes, no Placement, no ColorPalette, no NewToUnlock):
+    +46: SubjectName FName (8)
+    +54: Genre byte (1)
+    +55: LayoutStyle int32 (4)
+    +59: LayoutStyleColor int32 (4)
+    +63: SKU int32 (4)
+    +67: NextRowKeyIdx FName index (4) -- points to next row's RowKey name
+    +71: end of row
+
+  V2 — STANDARD GENRES (72 bytes: Action, Adult, Comedy, Drama, Fantasy, Horror,
+       Kid, Romance, Sci-Fi, Xmas). Adds Placement:
+    +46: SubjectName FName (8)
+    +54: Genre byte (1)
+    +55: Placement byte (1)
+    +56: LayoutStyle int32 (4)
+    +60: LayoutStyleColor int32 (4)
+    +64: SKU int32 (4)
+    +68: NextRowKeyIdx FName index (4)
+    +72: end of row
+
+  V3 — POLICE only (73 bytes). Adds ColorPalette:
+    +46: SubjectName FName (8)
+    +54: Genre byte (1)
+    +55: Placement byte (1)
+    +56: LayoutStyle int32 (4)
+    +60: LayoutStyleColor int32 (4)
+    +64: ColorPalette byte (1)
+    +65: SKU int32 (4)
+    +69: NextRowKeyIdx FName index (4)
+    +73: end of row
+
+  IMPORTANT OFFSET NOTE: all offsets above assume 2-digit BI "T_Bkg_XXX_YY\0" (13 bytes).
+  When BI is 3-digit "T_Bkg_XXX_YYY\0" (14 bytes), ALL fields after BI shift by +1.
+  build() uses _after_bi (= position right after BI string) as the anchor for all
+  post-BI field writes, so the shift is automatic as long as offsets are expressed
+  relative to _after_bi.
+
+  NewToUnlock is declared in Film_DataStructure but is NOT serialized in any cooked
+  base game DataTable. Do not write a NewToUnlock byte.
+
+ROW KEY FIELDS [0:8]:
+  +0: FName name_idx (uint32) -- base game always 0 (all rows share RowKey "first_name").
+      We write unique name_idx per slot so each row has a distinct TMap key.
+  +4: FName number / CompIndex (uint32) -- a per-DataTable magic value.
+      Action/Horror/Adult/Comedy/Drama/Fantasy/Kid/Romance/Sci-Fi/Xmas: 0x05001780
+      Adventure: 0x05101780   Western: 0x05201780   Police: 0x04001780
+      DO NOT MODIFY [4:8] EVER. Setting to 0 makes rows invisible.
+
+ROW PREFIX [0:46] (same across all schema versions):
+  +0:  RowKey FName (as above)
   +8:  ProductName FName idx -- PATCHED to our name table index
   +12: ProductName FName num = 0
   +16: SubjectImage FString len (always 9)
   +20: SubjectImage string "T_Sub_01\0" -- ALWAYS WRITE T_Sub_01.
        T_Sub_10..T_Sub_77 in DataTable rows causes FName encoding mismatch:
        the game can't resolve them to our injected textures.
-  +29: BackgroundImage FString len (always 13)
-  +33: BackgroundImage string "T_Bkg_XXX_YY\0" -- preserved from base game
-  +46: SubjectName FName idx -- PATCHED same as ProductName idx
-  +50: SubjectName FName num = 0
-  +54: Genre byte (enum) -- preserved
-  +55: Placement byte (enum) -- preserved
-  +56: LayoutStyle (int32) -- preserved
-  +60: LayoutStyleColor (int32) -- preserved
-  +64: SKU (int32) -- written by build(). Police: ingame_to_written_police() applies.
-  +68: Sequential counter (uint32, 1-based) -- unique row index in the table
+  +29: BackgroundImage FString len (13 for 2-digit, 14 for 3-digit bkg names)
+  +33: BackgroundImage string "T_Bkg_XXX_YY\0" or "T_Bkg_XXX_YYY\0"
+  +46: (start of schema-version-specific fields, see above)
+
+POLICE SKU: NO SHIFT NEEDED (reverted April 2026).
+  Earlier versions believed the game read Police SKU at offset 65 "due to an extra
+  trailing byte" and applied ingame_to_written_police() to shift SKU bytes. This was
+  wrong. Police SKU is at offset 65 in base game rows BECAUSE the V3 schema adds a
+  ColorPalette byte at offset 64 — the row parser walks the struct sequentially, so
+  SKU ends up at 65 after ColorPalette at 64. Once build() writes a ColorPalette byte,
+  SKU goes in its natural sequential position and equals slot["sku"] directly.
+  Police SKUs in base game are plain positive int32 values with prefix=1 (e.g. row 0
+  has SKU 14214471 = 0x00D8E547, last2=71). generate_sku() handles Police like any
+  other genre.
 
 ROW SIZES (discovered empirically, confirmed by in-game testing):
-  71 bytes: Adventure, Western  (LS/LSC/SKU at offsets 55/59/63 NOT 56/60/64)
-  72 bytes: Action, Adult, Comedy, Drama, Fantasy, Horror, Kid, Romance, Sci-Fi, Xmas
-  73 bytes: Police              (1 extra trailing byte -- causes the SKU offset problem)
+  71 bytes: Adventure, Western  (V1 schema, no Placement, no ColorPalette)
+  72 bytes: Action, Adult, Comedy, Drama, Fantasy, Horror, Kid, Romance, Sci-Fi, Xmas (V2)
+  73 bytes: Police              (V3, adds ColorPalette at +64)
 
 RK_NUM VARIANTS (value at row[4:8], detect from first row of base game uexp):
   0x05001780 -- Action, Adult, Comedy, Drama, Fantasy, Horror, Kid, Romance, Sci-Fi, Xmas
@@ -125,7 +185,9 @@ PER-GENRE TABLE:
 POLICE SPECIAL STRUCTURE:
   Base game has 6 physical slots + ~995 virtual rows in the TMap extra block.
   When we append rows and drop the extra block, the virtual rows disappear.
-  Base game Police has [0:4]=0, [4:8]=0x04001780 for ALL rows (no unique keys).
+  Base game Police has [0:4]=0, [4:8]=0x04001780 for ALL rows (no unique keys
+  in the serialized data — the TMap is rebuilt from the extra block at load).
+  Row layout is V3 (see ROW DATA FIELDS above): adds ColorPalette byte at +64.
 
 =============================================================================
 SECTION 2 -- NAME TABLE
@@ -197,48 +259,22 @@ For all genres EXCEPT Police:
   Adjacent genres have consecutive prefixes (Romance=9, Fantasy=10, Western=11).
   A +-2 scan causes cross-genre SKU collisions. Single exact prefix only.
 
-POLICE SKU EXCEPTION -- THE HARDEST PART OF THIS CODEBASE:
+  For Police specifically: the same SKU formula applies. Base game Police SKUs use
+  prefix=1 (e.g. 14214471 for Pol_01 row 0, 14292623 for row 1). GENRE_SKU_PREFIX["Police"]
+  was previously set to 8 (a leftover from the "SKU shift workaround" era); correct value
+  is 1, matching base game Police. No special row-level SKU encoding is needed — the V3
+  row schema (ColorPalette byte at +64, then SKU at +65) handles Police's apparent SKU
+  offset naturally.
 
-  Police rows are 73 bytes. The extra trailing byte causes both the game and
-  FModel to read the SKU from offset 65 instead of 64, assembling:
-    in_game_sku = [row[65], row[66], row[67], row[68]] as LE int32
-                = [sku_byte1, sku_byte2, sku_byte3, counter_lsb] as LE int32
-  where counter_lsb is the low byte of the counter for the LAST row of the slot.
-  The TMap keeps only the last inserted row per key.
-
-  This was proven April 2026: FModel-shown Police SKUs match this formula for
-  12/13 slots exactly. The user confirmed FModel values are the in-game search
-  values. See commit history for the multi-session debugging process.
-
-  Consequences:
-    1. Writing a standard SKU at offset 64 produces a garbled in-game SKU.
-    2. In-game last2 and holo come from the assembled 4-byte value.
-    3. Counter_lsb = (slot_idx+1)*77 & 0xFF >= 0x80 for 7/14 slots -> negative.
-
-  THE FIX (updated for 1-row-per-slot, April 2026):
-    A. Counter = slot_idx+1 (1..N): with 1 row per slot, the counter IS
-       slot_idx+1, always < 0x80 for <=127 slots -> always positive in-game SKU.
-       The old counter post-process (rewriting last row[68]) is no longer needed.
-    B. generate_police_ingame_sku(slot_idx, last2, want_holo): scans for a
-       candidate in-game SKU with high byte = slot_idx+1, right last2, right holo.
-    C. ingame_to_written_police(ingame_sku): converts to offset-64 write value:
-         written = [0, ingame_b0, ingame_b1, ingame_b2] as int32.
-       Called ONLY from build(). slot["sku"] always holds the in-game SKU.
-
-  SLOT["SKU"] CONTRACT (must not be broken by future changes):
-    slot["sku"] = IN-GAME SKU for ALL genres including Police.
-    sku_display() and sku_to_info() are called directly on slot["sku"].
-    build() is the only place that calls ingame_to_written_police().
-
-  PREVIOUS BUGS (documented so they are not re-introduced):
-    - slot["sku"] = written_sku: sku_display showed wrong stars because
-      written_sku % 100 != intended last2 of the in-game value.
-    - Counter = (slot_idx+1)*77: 7/14 slots had counter_lsb >= 0x80 -> negative.
-    - row[4:8] = 0: all rows invisible (FModel shows 0 rows). [4:8] is RK_NUM.
-
-  FModel displays garbled Police SKU values. This is expected, not a bug.
-  The garbled values ARE the correct in-game search values.
-  The tool's SKU copy field (right panel) shows them correctly.
+  HISTORICAL NOTE (April 2026, removed v1.8.1):
+    Earlier versions had generate_police_ingame_sku(), ingame_to_written_police(), and
+    police_ingame_sku() — a complex workaround for an imagined "Police SKU read from
+    offset 65" bug. The real cause was that build() was writing the V2 row schema
+    (no ColorPalette) for Police, so SKU ended up 1 byte off from where the V3 schema
+    parser expected it. The workaround was chasing the symptom. v1.8.1 writes the
+    correct V3 schema with ColorPalette, and Police uses normal generate_sku().
+    If you see references to ingame_to_written_police or generate_police_ingame_sku
+    in git history, those are the deleted workarounds — do not reintroduce.
 
 =============================================================================
 SECTION 4 -- T_SUB TEXTURE FORMAT
@@ -348,14 +384,17 @@ SECTION 8 -- KNOWN CRASH CAUSES AND FIXES
    Cause: row[4:8] was written to 0. This is the FNamePool CompIndex (RK_NUM).
    Fix: NEVER modify row[4:8]. Only write slot_idx to row[0:4].
 
-6. Police rating editor shows wrong stars after editing:
-   Cause: slot["sku"] stored the written value (uexp offset 64) not in-game value.
-   Fix: slot["sku"] = in-game SKU always. build() calls ingame_to_written_police().
+6. Police rating editor shows wrong stars after editing (resolved v1.8.1):
+   Historical cause: slot["sku"] stored a shifted value from ingame_to_written_police().
+   Current state: slot["sku"] stores the plain SKU directly; sku_display() works correctly.
 
-7. Police in-game SKU is negative / not findable in game search:
-   Cause (historical): counter for last row = (N+1)*77; for 7/14 slots
-   counter_lsb >= 0x80 -> negative SKU. Now resolved: with 1 row per slot
-   the counter IS slot_idx+1 (always < 0x80 for <=127 slots).
+7. Police / Western DataTable load crash on startup (resolved v1.8.1):
+   Cause: build() was writing the V2 row schema (Genre + Placement + LS + LSC + SKU)
+   for every genre regardless of row_size. Police needs V3 (adds ColorPalette byte
+   at +64); Western needs V1 (no Placement byte). Wrong schema → UE struct parser
+   reads fields from wrong positions → access violation during DataTable load.
+   Fix: build() now selects V1/V2/V3 schema based on detected _row_size.
+   See SECTION 1 ROW DATA FIELDS for the three schemas.
 
 =============================================================================
 SECTION 9 -- NEW RELEASE SYSTEM (T_New textures, Standees, NR DataTable)
@@ -452,7 +491,7 @@ on specific in-game days, have standee displays, and use T_New_XXX_NN textures.
 ============================================================================="""
 
 
-TOOL_VERSION = "v1.8.0"  # bump this on every release
+TOOL_VERSION = "v1.8.1"  # bump this on every release
 
 # Error codes for build diagnostics — shown to users for bug reports
 ERROR_CODES = {
@@ -1773,10 +1812,6 @@ def generate_sku(genre: str, slot_index: int, last2: int = 93,
     used_skus: optional pre-built set of already-taken SKUs; if None,
                built automatically from CLEAN_DT_SLOT_DATA.
     """
-    # Police uses a special SKU scheme due to its 73-byte row format.
-    if genre == "Police":
-        return generate_police_ingame_sku(slot_index - 1, last2=last2, rarity=rarity)
-
     if used_skus is None:
         used_skus = _all_used_skus()
 
@@ -1848,67 +1883,12 @@ def sku_to_stars(sku: int) -> tuple:
     return stars, critic
 
 
-def generate_police_ingame_sku(slot_idx: int, last2: int = 93,
-                               want_holo: bool = False,
-                               rarity: str = "Common") -> int:
-    """
-    For Police (73-byte rows): scans for a positive in-game SKU whose high byte
-    equals slot_idx+1 (the post-processed counter, 1..14), with the right last2
-    and matching rarity (holo + old flags).
-    """
-    ctr_byte = (slot_idx + 1) & 0xFF
-    base     = ctr_byte << 24
-    start_k  = last2 - (base % 100)
-    if start_k < 0:
-        start_k += 100
-    for k in range(start_k, 0x1000000, 100):
-        candidate = base + k
-        if candidate > 0x7FFFFFFF:
-            break
-        is_holo = _sku_is_holo(candidate)
-        is_old = _sku_is_old(candidate)
-        if rarity == "Common":
-            ok = not is_holo and not is_old
-        elif rarity == "Common (Old)":
-            ok = not is_holo and is_old
-        elif rarity == "Limited Edition (holo)":
-            ok = is_holo
-        else:  # "Random"
-            ok = True
-        if ok:
-            return candidate
-    return 0
-
-
-def ingame_to_written_police(ingame_sku: int) -> int:
-    """
-    Convert a Police in-game SKU to the value to write at uexp offset 64.
-    The game reads [offset65, 66, 67, counter] = [ingame_b0, b1, b2, slot_idx+1].
-    We store [0, ingame_b0, ingame_b1, ingame_b2] at offset 64 so that
-    reading from offset 65 picks up the right bytes. Called only by build().
-    """
-    import struct as _st
-    cb = _st.pack('<i', ingame_sku)
-    return _st.unpack('<i', bytes([0, cb[0], cb[1], cb[2]]))[0]
-
-
-def police_ingame_sku(written_sku: int, slot_idx: int, per_slot: int = 77) -> int:
-    """
-    Return the SKU value that the Police DataTable actually exposes in-game.
-    Police rows are 73 bytes (non-standard). The game's TMap keeps only the LAST
-    row inserted per key. That last row has counter = (slot_idx+1)*per_slot.
-    FModel and the game both read the SKU as a 4-byte window starting 1 byte into
-    the written SKU field (offset 65 rather than 64), with the counter's low byte
-    as the 4th byte. Formula verified against FModel output for all 13 Police slots.
-    For all other genres (72-byte rows) the in-game SKU equals the written SKU.
-    AI NOTE (April 2026): discovered after user confirmed FModel-shown values ARE
-    searchable in-game while our written 80010093 values were not findable.
-    """
-    import struct as _s
-    sb = _s.pack('<i', written_sku & 0xFFFFFFFF)
-    # last row counter = slot_idx + 1 (post-processed during build for ROW_SIZE==73)
-    ctr_lsb = (slot_idx + 1) & 0xFF
-    return _s.unpack('<i', sb[1:4] + bytes([ctr_lsb]))[0]
+# NOTE (v1.8.1, April 2026): generate_police_ingame_sku(), ingame_to_written_police(),
+# and police_ingame_sku() were deleted here. They were workarounds for a misdiagnosed
+# bug — the real issue was that build() was writing the V2 row schema for Police, so
+# SKU ended up 1 byte off from where the V3 parser expected it. Fixed by writing the
+# correct V3 schema (with ColorPalette byte). Police now uses generate_sku() directly.
+# See SECTION 3 POLICE SKU note in the module docstring for details.
 
 
 def sku_to_rarity(sku: int) -> str:
@@ -2990,15 +2970,25 @@ class CleanDataTableBuilder:
                 # [bkg_end+14:+18]     LayoutStyleColor int32
                 # [bkg_end+18:+22]     SKU int32
                 sn_off = bkg_end
-                if sn_off + 22 <= len(ue):
-                    # AI NOTE (April 2026): 71-byte rows (Western/Adventure) have
-                    # LS/LSC/SKU 1 byte earlier. The _row_size must be detected first.
+                if sn_off + 24 <= len(ue):
+                    # AI NOTE (v1.8.1, April 2026): schema-aware offsets.
+                    #   V1 (row_size 71, Western/Adventure): no Placement, no ColorPalette
+                    #     LS@+9, LSC@+13, SKU@+17
+                    #   V2 (row_size 72, standard): Placement yes, no ColorPalette
+                    #     LS@+10, LSC@+14, SKU@+18
+                    #   V3 (row_size 73, Police): Placement yes, ColorPalette yes
+                    #     LS@+10, LSC@+14, SKU@+19 (shifted by ColorPalette byte at +18)
                     if not hasattr(self, '_row_size'):
                         self._detect_uexp_layout()
-                    _ls_delta = 9 if self._row_size == 71 else 10
-                    ls  = struct.unpack_from("<i", ue, sn_off + _ls_delta)[0]
-                    lsc = struct.unpack_from("<i", ue, sn_off + _ls_delta + 4)[0]
-                    sku = struct.unpack_from("<i", ue, sn_off + _ls_delta + 8)[0]
+                    if self._row_size == 71:
+                        _ls_o, _lsc_o, _sku_o = 9, 13, 17
+                    elif self._row_size == 73:
+                        _ls_o, _lsc_o, _sku_o = 10, 14, 19
+                    else:
+                        _ls_o, _lsc_o, _sku_o = 10, 14, 18
+                    ls  = struct.unpack_from("<i", ue, sn_off + _ls_o)[0]
+                    lsc = struct.unpack_from("<i", ue, sn_off + _lsc_o)[0]
+                    sku = struct.unpack_from("<i", ue, sn_off + _sku_o)[0]
                     pn  = (self._name_table[pn_idx]
                            if 0 <= pn_idx < len(self._name_table) else "")
                     slots.append({
@@ -3186,11 +3176,6 @@ class CleanDataTableBuilder:
         row_s  = self._row_start
         rc_off = self._row_count_off
 
-        # LS/LSC/SKU field offsets (row-size-dependent)
-        _ls_off  = 55 if ROW_SIZE == 71 else 56
-        _lsc_off = 59 if ROW_SIZE == 71 else 60
-        _sku_off = 63 if ROW_SIZE == 71 else 64
-
         # Build bkg->slot_data mapping for quick lookup
         bkg_to_slot = {s["bkg_tex"]: s for s in slot_data}
 
@@ -3209,6 +3194,43 @@ class CleanDataTableBuilder:
         _placement  = getattr(self, '_placement', 0)
 
         if our_slots > 0:
+            # -----------------------------------------------------------------
+            # Schema-aware field offsets relative to _after_bi (April 2026).
+            # The three schema versions differ in which fields are serialized:
+            #   V1 (row_size 71, Western/Adventure): no Placement, no ColorPalette
+            #   V2 (row_size 72, standard genres): Placement, no ColorPalette
+            #   V3 (row_size 73, Police): Placement, ColorPalette
+            # NextRowKeyIdx is a uint32 FName index pointing to the next row's RowKey name.
+            # Field count per schema (counted from _after_bi):
+            #   V1: SN(8) + Genre(1) + LS(4) + LSC(4) + SKU(4) + NextKey(4) = 25 bytes
+            #   V2: SN(8) + Genre(1) + Place(1) + LS(4) + LSC(4) + SKU(4) + NextKey(4) = 26
+            #   V3: SN(8) + Genre(1) + Place(1) + LS(4) + LSC(4) + CP(1) + SKU(4) + NextKey(4) = 27
+            # -----------------------------------------------------------------
+            if ROW_SIZE == 71:
+                _schema = 'V1'
+                _has_place, _has_cp = False, False
+                _ls_o, _lsc_o, _sku_o, _nxt_o = 9, 13, 17, 21
+                _tail_size = 25
+                _cp_o = None
+            elif ROW_SIZE == 73:
+                _schema = 'V3'
+                _has_place, _has_cp = True, True
+                _ls_o, _lsc_o, _cp_o, _sku_o, _nxt_o = 10, 14, 18, 19, 23
+                _tail_size = 27
+            else:  # 72 or any other -> treat as V2 (standard)
+                _schema = 'V2'
+                _has_place, _has_cp = True, False
+                _ls_o, _lsc_o, _sku_o, _nxt_o = 10, 14, 18, 22
+                _tail_size = 26
+                _cp_o = None
+
+            # ColorPalette value for V3: base game Police uses 0x02 or 0x03 (no clear pattern).
+            # Safe default: 0 (first enum value, NewEnumerator0).
+            _cp_value = 0
+
+            print(f"[CleanDT] {self.dt_name}: using schema {_schema} "
+                  f"(Placement={_has_place}, ColorPalette={_has_cp})")
+
             for slot_idx in range(our_slots):
                 slot   = slot_data[slot_idx]
                 title  = overrides.get(slot["pn_name"], slot["pn_name"])
@@ -3220,48 +3242,49 @@ class CleanDataTableBuilder:
                 bi_str = bkg_b + b"\x00"
                 bi_len = len(bi_str)  # 13 for 2-digit, 14 for 3-digit
 
-                # Construct row with correct offsets for this BI length
+                # Construct row: prefix through BI, then schema-specific tail
                 row = bytearray(29)  # prefix: RowKey(8) + ProductName(8) + SI_len(4) + SI_str(9)
                 row[16:20] = struct.pack("<i", 9)  # SI FString length
                 row[20:29] = b"T_Sub_01\x00"
                 row += struct.pack("<i", bi_len)  # BI FString length
                 row += bi_str                      # BI string
                 _after_bi = len(row)
-                row += bytearray(8)   # SubjectName FName (filled below)
-                row += bytearray(1)   # genre byte
-                row += bytearray(1)   # placement byte
-                row += bytearray(4)   # LayoutStyle
-                row += bytearray(4)   # LayoutStyleColor
-                row += bytearray(4)   # SKU
-                row += bytearray(2)   # NextRowKeyIdx
-                row += bytearray(2)   # padding
+                row += bytearray(_tail_size)       # tail: fields from SN onward (schema-sized)
                 actual_row_size = len(row)
 
-                # Copy genre/placement from template
-                row[_after_bi + 8] = _genre_byte   # genre
-                row[_after_bi + 9] = _placement    # placement
+                # Fill RowKey, ProductName, SubjectName
+                struct.pack_into("<I", row, 0, name_idx(str(slot_idx + 1)))  # RowKey name_idx
+                struct.pack_into("<I", row, 4, rk_exp)                       # RowKey number (RK_NUM)
+                struct.pack_into("<i", row, 8,  pn_idx)                      # ProductName FName idx
+                struct.pack_into("<i", row, 12, 0)                           # ProductName number
+                struct.pack_into("<i", row, _after_bi, pn_idx)               # SubjectName FName idx
+                struct.pack_into("<i", row, _after_bi + 4, 0)                # SubjectName number
 
-                # Fill FName and value fields
-                struct.pack_into("<I", row, 0, name_idx(str(slot_idx + 1)))  # RowKey
-                struct.pack_into("<I", row, 4, rk_exp)                        # RowKey num
-                struct.pack_into("<i", row, 8,  pn_idx)                      # ProductName
-                struct.pack_into("<i", row, 12, 0)
-                struct.pack_into("<i", row, _after_bi, pn_idx)               # SubjectName
-                struct.pack_into("<i", row, _after_bi + 4, 0)
+                # Genre byte (always present at _after_bi + 8)
+                row[_after_bi + 8] = _genre_byte
 
-                _is_police = (self.dt_name == "Police")
-                sku_v = ingame_to_written_police(slot["sku"]) if _is_police else slot["sku"]
-                struct.pack_into("<i", row, _after_bi + 18, sku_v)           # SKU
+                # Placement byte (V2/V3 only, at _after_bi + 9)
+                if _has_place:
+                    row[_after_bi + 9] = _placement
 
+                # LayoutStyle, LayoutStyleColor
                 _ls_val2 = slot["ls"]
                 if _ls_val2 == 0:
                     import random as _rnd
                     _ls_val2 = _rnd.randint(1, 5)
-                struct.pack_into("<i", row, _after_bi + 10, _ls_val2)        # LayoutStyle
-                struct.pack_into("<i", row, _after_bi + 14, slot["lsc"])      # LayoutStyleColor
+                struct.pack_into("<i", row, _after_bi + _ls_o,  _ls_val2)    # LayoutStyle
+                struct.pack_into("<i", row, _after_bi + _lsc_o, slot["lsc"]) # LayoutStyleColor
 
+                # ColorPalette byte (V3 only)
+                if _has_cp:
+                    row[_after_bi + _cp_o] = _cp_value & 0xFF
+
+                # SKU (all schemas) — no shift or conversion, plain value
+                struct.pack_into("<i", row, _after_bi + _sku_o, slot["sku"])
+
+                # NextRowKeyIdx — points to next row's RowKey name
                 next_rk_idx = name_idx(str(slot_idx + 2))
-                struct.pack_into("<I", row, _after_bi + 22, next_rk_idx)     # NextRowKeyIdx
+                struct.pack_into("<I", row, _after_bi + _nxt_o, next_rk_idx)
 
                 new_rows += row
 
@@ -3273,7 +3296,7 @@ class CleanDataTableBuilder:
             # The sentinel is visible in the in-game computer list but cannot be
             # clicked (it has no valid SKU), serving as a harmless end marker.
             if our_slots > 0 and new_rows:
-                # Clone the last custom row as sentinel template
+                # Clone the last custom row as sentinel template (preserves schema layout)
                 sentinel = bytearray(new_rows[-actual_row_size:])
                 sentinel_idx = our_slots
                 sentinel_rk_str = str(sentinel_idx + 1)
@@ -3284,11 +3307,11 @@ class CleanDataTableBuilder:
                 struct.pack_into("<i", sentinel, 12, 0)
                 struct.pack_into("<i", sentinel, _after_bi, sentinel_pn_idx)
                 struct.pack_into("<i", sentinel, _after_bi + 4, 0)
-                struct.pack_into("<i", sentinel, _after_bi + 18, 0)  # SKU = 0
-                struct.pack_into("<I", sentinel, _after_bi + 22, 0)  # next = 0 (end)
+                struct.pack_into("<i", sentinel, _after_bi + _sku_o, 0)      # SKU = 0
+                struct.pack_into("<I", sentinel, _after_bi + _nxt_o, 0)      # next = 0 (end)
                 # Fix last real row to point to sentinel
                 real_last_start = len(new_rows) - actual_row_size
-                struct.pack_into("<I", new_rows, real_last_start + _after_bi + 22,
+                struct.pack_into("<I", new_rows, real_last_start + _after_bi + _nxt_o,
                                  name_idx(sentinel_rk_str))
                 new_rows += sentinel
                 print(f"[CleanDT] Added 'End of List' sentinel row (SKU=0, key='{sentinel_rk_str}')")
@@ -4047,8 +4070,14 @@ KID_SLOT_DATA = [
     {"bkg_tex":"T_Bkg_Kid_11","pn_name":"Aladdin",                           "ls":10, "lsc":5,  "sku":12063273, "ntu":False},
 ]
 
-# AI NOTE (April 2026): Police slot["sku"] stores the IN-GAME SKU (same contract as all
-# other genres). build() calls ingame_to_written_police() to convert before writing to uexp.
+# AI NOTE (v1.8.1, April 2026): slot["sku"] stores the SKU value directly (no shift/conversion).
+# For Police and all other genres, build() writes slot["sku"] at the schema's SKU offset.
+# These default SKUs are carried over from the v1.8.0 encoding (high-byte = slot_idx+1,
+# e.g. 0x0100005D) which produced valid positive int32 values. They remain functional under
+# the new layout but were generated with a different formula than generate_sku() now uses.
+# If you re-roll a Police SKU via the UI, it will use prefix=8 via generate_sku(), which
+# gives cleaner values in the 8.0M..8.2M range. Existing defaults kept as-is to avoid
+# shifting SKUs for existing user saves.
 # Default rating: 4.5★ Common (last2=93).
 POLICE_SLOT_DATA = [
     {"bkg_tex":"T_Bkg_Pol_01","pn_name":"Striking Distance",         "ls":3  ,"lsc":2  ,"sku":16777293, "ntu":False},
