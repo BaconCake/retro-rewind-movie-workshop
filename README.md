@@ -1,6 +1,6 @@
 # Retro Rewind Movie Workshop
 
-Custom VHS cover art and New Release standee tool for [Retro Rewind](https://store.steampowered.com/app/2427940/Retro_Rewind/) (Steam Early Access).
+Custom VHS cover art and New Release standee tool for [Retro Rewind](https://store.steampowered.com/app/2427940/Retro_Rewind/) (Steam).
 
 ## What it does
 
