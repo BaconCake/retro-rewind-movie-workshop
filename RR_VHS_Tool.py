@@ -2072,16 +2072,52 @@ def add_nr_slot(genre, title="New Release", standee_shape="A"):
         print(f"[NR] Genre '{genre}' not supported for New Releases "
               f"(no base game T_New textures)")
         return None
+
+    # Soft cap: 99 NRs per genre. The bkg_tex format "T_New_{code}_{tex_num:02d}"
+    # produces 12-char strings like "T_New_Dra_99". At tex_num=100+, the string
+    # widens to 13 chars ("T_New_Dra_100"), changing the BI FString length in
+    # the DataTable row by 1 byte. That breaks the DataTable's fixed row layout.
+    # 3-digit NR support is feasible but requires wider changes (asset registry,
+    # build pipeline, format strings throughout) — parked for future release.
+    NR_PER_GENRE_CAP = 99
+    existing_count_for_genre = sum(
+        1 for s in NR_SLOT_DATA if s.get("genre") == genre
+    )
+    if existing_count_for_genre >= NR_PER_GENRE_CAP:
+        print(f"[NR] Cannot add NR to '{genre}': already at cap "
+              f"({NR_PER_GENRE_CAP} per genre).")
+        return None
+
     code = GENRES[genre]["code"]
     genre_byte = NR_GENRE_BYTE[genre]
     base_new_count = GENRES[genre].get("new", 0)
 
-    # Cycle through T_New texture slots (1..max(base_new_count, 1))
-    # Genres without base game T_New textures still work — the build system
-    # creates T_New assets from templates.
+    # Choose tex_num for this NR.
+    # Genres have a fixed number of base game T_New texture slots (1..base_new_count).
+    # When a genre's NR count exceeds that, multiple NRs share a texture slot —
+    # they keep their own SKUs/titles/standees but visually share the same cover.
+    # That's intentional: it's how the tool supports up to 99 NRs per genre even
+    # when the base game only ships e.g. 3 NR slots for Drama.
+    #
+    # Bug fix (v1.8.2): use the smallest UNUSED tex_num within the base range
+    # first. The previous count-based formula `(count % slot_count) + 1` assigned
+    # already-in-use tex_nums after a deletion (e.g. NR #1 at tex_01, NR #2 at
+    # tex_02, delete NR #1, add NR #3 → buggy formula gave tex_02 again,
+    # colliding with the still-existing NR #2). New logic checks what's actually
+    # in use before assigning. Wrapping to share a texture only happens when ALL
+    # base slots are genuinely occupied, matching the genre-change logic at
+    # _change_nr_genre().
     existing_for_genre = [s for s in NR_SLOT_DATA if s.get("genre") == genre]
     slot_count = max(base_new_count, 1)
-    tex_num = (len(existing_for_genre) % slot_count) + 1
+    used_tex_nums = {s.get("tex_num") for s in existing_for_genre}
+    # Try lowest unused base slot first
+    tex_num = next(
+        (n for n in range(1, slot_count + 1) if n not in used_tex_nums),
+        None,
+    )
+    if tex_num is None:
+        # All base slots in use — share with one of them (cycle by count).
+        tex_num = (len(existing_for_genre) % slot_count) + 1
     bkg_tex = f"T_New_{code}_{tex_num:02d}"
 
     # Generate a 5-digit SKU unique across all NR slots
@@ -8766,7 +8802,19 @@ class VHSToolApp:
                   command=dlg.destroy).pack(pady=8)
         self.root.wait_window(dlg)
         if chosen[0]:
-            slot = add_nr_slot(chosen[0])
+            genre = chosen[0]
+            # Pre-check the per-genre cap so we can show a clear message
+            existing_count = sum(1 for s in NR_SLOT_DATA if s.get("genre") == genre)
+            if existing_count >= 99:
+                messagebox.showwarning(
+                    "New Release limit reached",
+                    f"'{genre}' already has the maximum of 99 New Releases.\n\n"
+                    f"To add another, delete an existing NR in this genre first, "
+                    f"or pick a different genre.",
+                    parent=self.root,
+                )
+                return
+            slot = add_nr_slot(genre)
             if slot:
                 self._populate_shelf()
                 self._select_nr_slot(len(NR_SLOT_DATA) - 1)
