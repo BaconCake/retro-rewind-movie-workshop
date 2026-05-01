@@ -491,7 +491,7 @@ on specific in-game days, have standee displays, and use T_New_XXX_NN textures.
 ============================================================================="""
 
 
-TOOL_VERSION = "v1.8.1"  # bump this on every release
+TOOL_VERSION = "v1.8.2"  # bump this on every release
 
 # Error codes for build diagnostics — shown to users for bug reports
 ERROR_CODES = {
@@ -557,6 +557,7 @@ CUSTOM_SLOTS_FILE = os.path.join(SCRIPT_DIR, "custom_slots.json")
 BASE_EDITS_FILE   = os.path.join(SCRIPT_DIR, "base_slot_edits.json")
 EDITED_SLOTS_FILE = os.path.join(SCRIPT_DIR, "edited_slots.json")
 SHIPPED_SLOTS_FILE = os.path.join(SCRIPT_DIR, "shipped_slots.json")
+SORT_PREFS_FILE   = os.path.join(SCRIPT_DIR, "sort_preferences.json")
 OUTPUT_DIR   = os.path.join(SCRIPT_DIR, "Output")
 
 # EXPERIMENTAL: omit all base-game slots from built pak (custom slots only)
@@ -2136,6 +2137,7 @@ def add_nr_slot(genre, title="New Release", standee_shape="A"):
         "sku": sku,
         "standee_shape": standee_shape,
         "tex_num": tex_num,
+        "created_at": _now_iso(),
     }
     NR_SLOT_DATA.append(slot)
     save_nr_slots()
@@ -2299,6 +2301,255 @@ def clear_edited_slots():
     except Exception:
         pass
     return set()
+
+
+# ── Sort preferences (per-tab) ────────────────────────────────────────
+# Stored as a dict: { "<tab name>": "<sort_key>", ... }
+# Tab name is either a genre name (e.g. "Action", "Horror") or the
+# special key "New Releases" for the NR tab. Each tab keeps its own
+# preference independently.
+# sort_key values: "name_asc", "name_desc",
+#                  "created_asc", "created_desc",
+#                  "edited_asc", "edited_desc"
+# Default for any tab with no saved entry: "created_asc" (oldest first).
+def load_sort_prefs() -> dict:
+    """Load per-tab sort preferences. Returns {} on missing/corrupted file."""
+    try:
+        if os.path.exists(SORT_PREFS_FILE):
+            with open(SORT_PREFS_FILE) as f:
+                d = json.load(f)
+                if isinstance(d, dict):
+                    return d
+    except Exception:
+        pass
+    return {}
+
+
+def save_sort_prefs(prefs: dict):
+    """Persist per-tab sort preferences to disk."""
+    try:
+        with open(SORT_PREFS_FILE, 'w') as f:
+            json.dump(prefs, f, indent=2)
+    except Exception as e:
+        print(f"[sort_prefs] save error: {e}")
+
+
+# ── Timestamp helpers ─────────────────────────────────────────────────
+# Custom slots may carry two optional ISO-8601 string fields:
+#   created_at     — set ONCE on creation, never updated
+#   last_edited_at — updated when the user finishes editing a slot
+# Slots created before this feature shipped have neither field; sort
+# logic falls back to slot-number order for those.
+def _now_iso() -> str:
+    """Return the current local time as an ISO-8601 string (no microseconds)."""
+    import datetime as _dt
+    return _dt.datetime.now().replace(microsecond=0).isoformat()
+
+
+# =============================================================================
+# MOVIE LIST SORT FEATURE  (added v1.8.2)
+# =============================================================================
+#
+# Per-tab sort controls in the GENRE SHELF header. Six modes:
+#   Name ▴/▾, Created at ▴/▾, Last edited ▴/▾
+#
+# Default for every tab: "Created at ▴" (oldest first). This preserves the
+# legacy slot-creation-order behavior for users with existing libraries —
+# slots without timestamps fall back to slot-number ordering, so the list
+# looks identical to before until users start adding/editing.
+#
+# Visibility rules:
+#   - Visible on every single-genre tab AND on the "New Releases" tab
+#   - Hidden only on the "All Movies" tab (multi-genre overview)
+#   - Sort dropdown popup positions itself directly below the trigger button
+#
+# Files / persistence:
+#   sort_preferences.json   — per-tab saved sort key, e.g.
+#                             { "Action": "name_asc",
+#                               "Horror": "edited_desc",
+#                               "New Releases": "created_desc" }
+#
+# Per-slot timestamp fields (optional, in both custom_slots.json and
+# nr_custom_slots.json):
+#   created_at:     ISO-8601 string, set ONCE on slot creation, never updated
+#   last_edited_at: ISO-8601 string, written when the user navigates away
+#                   from a slot they edited (selection change, tab switch,
+#                   Build). "Edits" that count: title, cover image, rating,
+#                   rarity, layout, standee type. Mere viewing does NOT
+#                   update it.
+#
+# Sort behavior:
+#   - "New Movie" placeholder titles are NOT special-cased — they sort with
+#     everyone else, alphabetically by title (so they land in the N-block on
+#     name sort) or by their actual timestamps on date sorts.
+#   - Date sorts split entries into two ranks: timestamped first, no-timestamp
+#     fallback second. Direction (▴/▾) flips ordering within each rank but
+#     does NOT cause no-timestamp entries to overtake timestamped ones.
+#   - For NR slots without timestamps, the fallback ordering uses
+#     (genre tab position, tex_num) — so NRs sort by their genre tab order
+#     first, then by their texture slot number within each genre.
+# =============================================================================
+
+# ── Sort option metadata ──────────────────────────────────────────────
+# Each option has:
+#   key:       stored in sort_preferences.json
+#   label:     shown on the trigger button (without the arrow)
+#   arrow:     "▴" (ascending) or "▾" (descending)
+#   field:     the comparator dimension — "name" / "created" / "edited"
+#   ascending: True if ▴ else False
+SORT_OPTIONS = [
+    {"key": "name_asc",     "label": "Name",          "arrow": "▴",
+     "field": "name",       "ascending": True},
+    {"key": "name_desc",    "label": "Name",          "arrow": "▾",
+     "field": "name",       "ascending": False},
+    {"key": "created_asc",  "label": "Created at",    "arrow": "▴",
+     "field": "created",    "ascending": True},
+    {"key": "created_desc", "label": "Created at",    "arrow": "▾",
+     "field": "created",    "ascending": False},
+    {"key": "edited_asc",   "label": "Last edited",   "arrow": "▴",
+     "field": "edited",     "ascending": True},
+    {"key": "edited_desc",  "label": "Last edited",   "arrow": "▾",
+     "field": "edited",     "ascending": False},
+]
+
+DEFAULT_SORT_KEY = "created_asc"   # oldest first — preserves legacy order
+
+
+def _get_sort_option(key: str) -> dict:
+    """Return the SORT_OPTIONS entry for a key, falling back to default."""
+    for opt in SORT_OPTIONS:
+        if opt["key"] == key:
+            return opt
+    return next(o for o in SORT_OPTIONS if o["key"] == DEFAULT_SORT_KEY)
+
+
+def _slot_for_texture(texture: dict):
+    """Resolve a shelf texture dict to its underlying CLEAN_DT_SLOT_DATA entry.
+
+    Returns (slot_dict, slot_index) — slot_index is 0-based within its DT,
+    used as the legacy fallback ordering when timestamps are absent.
+    Returns (None, -1) if the texture isn't a custom slot (shouldn't happen
+    in CUSTOM_ONLY_MODE but kept defensive).
+    """
+    name  = texture.get("name", "")
+    genre = texture.get("genre", "")
+    dt    = GENRE_DATATABLE.get(genre)
+    if not dt:
+        return None, -1
+    slots = CLEAN_DT_SLOT_DATA.get(dt, [])
+    for i, s in enumerate(slots):
+        if s.get("bkg_tex") == name:
+            return s, i
+    return None, -1
+
+
+def _sort_textures(textures: list, sort_key: str) -> list:
+    """Sort a list of texture dicts (genre slots) according to sort_key.
+
+    Rules:
+      - All entries sort uniformly by the chosen field. Movies whose title
+        is still the default "New Movie" are NOT special-cased — they sort
+        with everyone else (alphabetically by title, or by their timestamps
+        / slot index in the date sort modes).
+      - For date sorts, slots without the relevant timestamp (legacy data
+        from before this feature) fall back to slot-number ordering, after
+        the timestamped entries — preserving original list order for
+        libraries that pre-date this feature.
+      - Direction (▴/▾) flips order WITHIN each rank, but does NOT put
+        no-timestamp entries before timestamped ones.
+    """
+    opt = _get_sort_option(sort_key)
+    field = opt["field"]
+    asc = opt["ascending"]
+
+    # Pre-resolve each texture to its slot data and timestamps.
+    resolved = []
+    for t in textures:
+        slot, idx = _slot_for_texture(t)
+        if slot is None:
+            # Defensive fallback for textures with no matching slot data.
+            resolved.append({
+                "tex": t, "idx": idx, "title": "",
+                "ts_c": None, "ts_e": None,
+            })
+            continue
+        resolved.append({
+            "tex":   t,
+            "idx":   idx,
+            "title": slot.get("pn_name", "") or "",
+            "ts_c":  slot.get("created_at") or None,
+            "ts_e":  slot.get("last_edited_at") or None,
+        })
+
+    if field == "name":
+        # Stable secondary key: slot idx so identical titles keep insert order.
+        resolved.sort(key=lambda r: (r["title"].lower(), r["idx"]),
+                      reverse=not asc)
+        return [r["tex"] for r in resolved]
+
+    # Date sorts: split has-ts vs no-ts BEFORE applying direction so the
+    # "has-ts always before no-ts" invariant holds in both directions.
+    ts_field = "ts_c" if field == "created" else "ts_e"
+    with_ts = [r for r in resolved if r[ts_field]]
+    no_ts   = [r for r in resolved if not r[ts_field]]
+    # ISO-8601 sorts lexicographically same as chronologically.
+    with_ts.sort(key=lambda r: (r[ts_field], r["idx"]), reverse=not asc)
+    no_ts.sort(key=lambda r: r["idx"], reverse=not asc)
+    return [r["tex"] for r in (with_ts + no_ts)]
+
+
+def _sort_nr_slots(nr_slots: list, sort_key: str) -> list:
+    """Sort an enumerated list of NR slots according to sort_key.
+
+    Input format: list of (original_index, nr_slot_dict) tuples — the
+    original index is preserved through sorting because the NR rendering
+    code uses it as the click-target identity in NR_SLOT_DATA.
+
+    Rules mirror _sort_textures, with one specific fallback:
+      - For date sorts on slots WITHOUT the relevant timestamp, fall back
+        to (genre_position_in_GENRES, tex_num) — i.e. follow the genre tab
+        order, then numeric NR slot within each genre. e.g. with
+        Action=0, Comedy=3, Drama=4 in GENRES order:
+          [Dra_01, Com_01, Hor_02, Dra_02, Com_02]   ascending becomes
+          [Com_01, Com_02, Dra_01, Dra_02, Hor_02]
+    """
+    opt = _get_sort_option(sort_key)
+    field = opt["field"]
+    asc = opt["ascending"]
+
+    # Build a stable genre-rank map matching the GENRES dict insertion order.
+    # GENRES is the authoritative tab order (see _build_ui's genres_display).
+    _genre_rank = {g: i for i, g in enumerate(GENRES.keys())}
+
+    def _genre_pos(nr):
+        return _genre_rank.get(nr.get("genre", ""), 999)
+
+    def _tex_num(nr):
+        return nr.get("tex_num", 0) or 0
+
+    if field == "name":
+        # Sort by NR title (user-visible name).
+        result = sorted(
+            nr_slots,
+            key=lambda kv: ((kv[1].get("title", "") or "").lower(),
+                            _genre_pos(kv[1]), _tex_num(kv[1])),
+            reverse=not asc,
+        )
+        return result
+
+    # Date sorts.
+    ts_field = "created_at" if field == "created" else "last_edited_at"
+    with_ts = [(i, n) for (i, n) in nr_slots if n.get(ts_field)]
+    no_ts   = [(i, n) for (i, n) in nr_slots if not n.get(ts_field)]
+    # ISO-8601 sorts lexicographically same as chronologically.
+    with_ts.sort(key=lambda kv: (kv[1][ts_field],
+                                 _genre_pos(kv[1]), _tex_num(kv[1])),
+                 reverse=not asc)
+    # Fallback for legacy NRs: alphabetical by genre tab order, then tex_num.
+    no_ts.sort(key=lambda kv: (_genre_pos(kv[1]), _tex_num(kv[1])),
+               reverse=not asc)
+    return with_ts + no_ts
+
 
 def load_shipped_slots():
     """Load the set of texture names that have been successfully built at least once."""
@@ -4371,6 +4622,7 @@ def add_movie_slot(genre, title, ls=0, lsc=4, sku=None, last2=93, rarity="Common
         "lsc":     lsc,
         "sku":     sku,
         "ntu":     False,
+        "created_at": _now_iso(),
     }
     slot_data.append(new_slot)
     save_custom_slots()
@@ -6582,6 +6834,10 @@ class VHSToolApp:
         # Edited-since-last-build tracking (persisted to disk)
         self._edited_slots = load_edited_slots()
         self._shipped_slots = load_shipped_slots()
+        # Per-tab sort preferences (default: created_asc / oldest first).
+        # Keys are tab names: genre names like "Action", or "New Releases".
+        self._sort_prefs = load_sort_prefs()
+        self._sort_dropdown_open = False  # popup state flag
 
         self.root.title(f"Retro Rewind Movie Workshop  {TOOL_VERSION}")
         self.root.minsize(900, 600)
@@ -6596,6 +6852,10 @@ class VHSToolApp:
 
         self._apply_ttk_style()
         self._build_ui()
+        # Default tab is "All Movies" — sort control is hidden on that tab
+        # (the multi-genre view doesn't sort). Visible on every other tab.
+        if hasattr(self, "_show_sort_control"):
+            self._show_sort_control(False)
         self._populate_shelf()
         self._preload_layouts()
         # Background preload all 5 layout textures — starts immediately,
@@ -6854,10 +7114,86 @@ class VHSToolApp:
 
     # ── Layout preload ─────────────────────────────────────────
     def _mark_edited(self, name):
-        """Mark a texture slot as edited since last build, persist to disk."""
+        """Mark a texture slot as edited since last build, persist to disk.
+
+        Also flags the slot as having pending edits whose `last_edited_at`
+        timestamp will be committed when the user moves away (selecting a
+        different slot, switching genre, or clicking Build). This avoids
+        a torrent of timestamp updates on every small canvas nudge or
+        keystroke — we just commit once when the user is "done."
+        """
         if name and name not in self._edited_slots:
             self._edited_slots.add(name)
             save_edited_slots(self._edited_slots)
+        # Track that this slot has pending changes whose timestamp hasn't
+        # been written yet. _flush_pending_edit_timestamp() commits later.
+        if name:
+            if not hasattr(self, "_pending_edit_slots"):
+                self._pending_edit_slots = set()
+            self._pending_edit_slots.add(name)
+
+    def _flush_pending_edit_timestamp(self):
+        """Commit `last_edited_at` for any slots flagged via _mark_edited().
+
+        Called when the user moves away from an edited slot — e.g. selects
+        another slot, switches genre tab, or clicks Build. Writes the
+        current time to each pending slot's `last_edited_at` field and
+        persists. Single batched save per flush.
+        """
+        pending = getattr(self, "_pending_edit_slots", None)
+        if not pending:
+            return
+        ts = _now_iso()
+        # Find each slot by its texture name (== bkg_tex) across all DTs
+        # plus NR slots, set last_edited_at, and persist once at the end.
+        any_changed = False
+        for tex_name in list(pending):
+            # Genre slots
+            for dt_name, slots in CLEAN_DT_SLOT_DATA.items():
+                for s in slots:
+                    if s.get("bkg_tex") == tex_name:
+                        s["last_edited_at"] = ts
+                        any_changed = True
+                        break
+            # NR slots — bkg_tex is shared so disambiguate by stable_key match.
+            # But since _mark_edited is fed bkg_tex names from the shelf and NRs
+            # also have bkg_tex, we'd hit the wrong slot. NRs get marked via a
+            # separate path (NR-edits set the flag with the NR's stable key, not
+            # bkg_tex). For now, also scan NR_SLOT_DATA by bkg_tex match if the
+            # slot exists there too. NR-specific timestamping is handled when an
+            # NR is the selected slot during a flush — see _flush_pending_nr().
+        if any_changed:
+            try:
+                save_custom_slots()
+            except Exception as e:
+                print(f"[timestamp] save_custom_slots error: {e}")
+        pending.clear()
+
+    def _flush_pending_nr_timestamp(self, nr_idx):
+        """Commit last_edited_at for a single NR slot if it was marked dirty.
+
+        NR slots are tracked separately because their identity is the index +
+        SKU, not a unique bkg_tex (multiple NRs can share bkg_tex). Called
+        from NR-side selection-change and tab-switch hooks.
+        """
+        flag_attr = "_pending_nr_edit_idx"
+        if not hasattr(self, flag_attr):
+            return
+        pending_idx = getattr(self, flag_attr)
+        if pending_idx is None or not (0 <= pending_idx < len(NR_SLOT_DATA)):
+            setattr(self, flag_attr, None)
+            return
+        NR_SLOT_DATA[pending_idx]["last_edited_at"] = _now_iso()
+        try:
+            save_nr_slots()
+        except Exception as e:
+            print(f"[timestamp] save_nr_slots error: {e}")
+        setattr(self, flag_attr, None)
+
+    def _mark_nr_edited(self, nr_idx):
+        """Flag an NR slot as having pending edits (for last_edited_at)."""
+        if 0 <= nr_idx < len(NR_SLOT_DATA):
+            self._pending_nr_edit_idx = nr_idx
 
     def _preload_layouts(self):
         """No-op — layouts are now preloaded in background thread."""
@@ -7117,6 +7453,41 @@ class VHSToolApp:
         tk.Label(shelf_header, text="GENRE SHELF",
                  font=_vcr(11, bold=True), fg=CYAN, bg=C["card"]
                  ).pack(side=tk.LEFT)
+
+        # ── Sort control (right side of GENRE SHELF header) ──
+        # Visible on every tab EXCEPT "All Movies" (the multi-genre view
+        # doesn't sort). For all other tabs — single genre tabs and the
+        # "New Releases" tab — the sort control is shown and the chosen
+        # sort is persisted independently per tab. See _select_genre and
+        # _show_sort_control for the visibility logic. The trigger button
+        # shows the current sort selection (label + arrow); clicking it
+        # opens a Toplevel dropdown popup. Sort state is persisted per-tab
+        # to sort_preferences.json — see SORT_OPTIONS / _on_sort_selected.
+        self._sort_control_frame = tk.Frame(shelf_header, bg=C["card"])
+        self._sort_control_frame.pack(side=tk.RIGHT)
+
+        sort_lbl = tk.Label(self._sort_control_frame, text="Sort by",
+                            font=_vcr(9), fg=DS["text3"], bg=C["card"])
+        sort_lbl.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Cyan text-button styled like a clickable label. Initial label is
+        # the default sort ("Created at ▴"); _refresh_sort_btn_label updates
+        # it whenever the active genre's stored preference changes.
+        self._sort_btn = tk.Label(
+            self._sort_control_frame, text="Created at  ▴",
+            font=_vcr(9, bold=True), fg=DS["cyan"], bg=C["card"],
+            cursor="hand2", padx=6, pady=2,
+        )
+        self._sort_btn.pack(side=tk.LEFT)
+
+        # Bind the click handler to every visible widget in the control —
+        # the cyan label, the parent frame, and the "Sort by" prefix label.
+        # Single-widget binding sometimes misses on certain cursor positions
+        # in Tkinter; binding the whole area makes the trigger reliable.
+        def _sort_click_handler(_e=None):
+            self._toggle_sort_dropdown()
+        for w in (self._sort_btn, self._sort_control_frame, sort_lbl):
+            w.bind("<Button-1>", _sort_click_handler)
 
         # Canvas + scrollbar for tile gallery
         shelf_canvas_outer = tk.Frame(shelf_outer, bg=C["card"])
@@ -8686,6 +9057,9 @@ class VHSToolApp:
         """Select a New Release slot for editing."""
         if idx < 0 or idx >= len(NR_SLOT_DATA):
             return
+        # Commit pending last_edited_at for whatever was previously selected.
+        self._flush_pending_edit_timestamp()
+        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
         self._selected_nr_idx = idx
         nr = NR_SLOT_DATA[idx]
 
@@ -8751,6 +9125,7 @@ class VHSToolApp:
         new_title = self._inline_title_var.get().strip()
         if new_title and new_title != NR_SLOT_DATA[idx]["title"]:
             NR_SLOT_DATA[idx]["title"] = new_title
+            self._mark_nr_edited(idx)
             save_nr_slots()
             self._refresh_shelf_keep_scroll()
 
@@ -8827,6 +9202,7 @@ class VHSToolApp:
         new_shape = self._nr_standee_var.get()
         if new_shape in NR_STANDEE_SHAPES:
             NR_SLOT_DATA[idx]["standee_shape"] = new_shape
+            self._mark_nr_edited(idx)
             save_nr_slots()
             self._populate_shelf()
 
@@ -8873,6 +9249,7 @@ class VHSToolApp:
                     break
             nr["tex_num"] = tex_num
             nr["bkg_tex"] = f"T_New_{code}_{tex_num:02d}"
+            self._mark_nr_edited(idx)
             save_nr_slots()
             self._populate_shelf()
 
@@ -8923,6 +9300,7 @@ class VHSToolApp:
         idx = getattr(self, '_selected_nr_idx', -1)
         if 0 <= idx < len(NR_SLOT_DATA):
             NR_SLOT_DATA[idx]["standee_shape"] = shape
+            self._mark_nr_edited(idx)
             save_nr_slots()
             # Auto-switch to Standee preview mode
             if hasattr(self, '_nr_view_mode') and self._nr_view_mode.get() != "Standee":
@@ -8970,6 +9348,12 @@ class VHSToolApp:
                 self._nr_rating_info.pack_forget()
 
     def _select_genre(self, genre):
+        # Commit pending last_edited_at for the slot that's about to be deselected.
+        self._flush_pending_edit_timestamp()
+        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
+        # Close any open sort dropdown when switching tabs.
+        if hasattr(self, "_close_sort_dropdown"):
+            self._close_sort_dropdown()
         self._scroll_tab_into_view(genre)
         self._genre_var.set(genre)
         # Clear selection when switching tabs
@@ -8981,6 +9365,13 @@ class VHSToolApp:
         self._draw_preview()
         self._update_viewport_state()
         self._update_tab_colors(genre)
+        # Show sort control on single-genre tabs AND the New Releases tab.
+        # Hidden only on "All Movies" because that's a multi-genre view.
+        sortable_tab = (genre != "All Movies")
+        if hasattr(self, "_show_sort_control"):
+            self._show_sort_control(sortable_tab)
+            if sortable_tab:
+                self._refresh_sort_btn_label()
         self._populate_shelf()
         self._update_tab_colors(genre)
         self._update_sticky_add_btn(genre)
@@ -9825,7 +10216,304 @@ class VHSToolApp:
         max_total = genre_count * 999 + 999
         self._stats_var.set(f"Movies: {total_movies} / {max_total}")
 
+    # ── Sort dropdown UI (added v1.8.2) ───────────────────────
+    # See the SORT FEATURE block at module top (near SORT_OPTIONS) for the
+    # full feature spec. Public surface from this group:
+    #
+    #   _format_sort_btn_label  — label text from a sort key
+    #   _refresh_sort_btn_label — update trigger button text after change
+    #   _show_sort_control      — show / hide the entire sort area
+    #   _toggle_sort_dropdown   — open/close the popup (bound to the click)
+    #   _open_sort_dropdown     — internal: build and position the popup
+    #   _close_sort_dropdown    — internal: tear down popup + bindings
+    #   _on_sort_selected       — internal: handle option click
+    #   _sort_animate_reorder   — brief dim + repopulate transition
+    def _format_sort_btn_label(self, sort_key: str) -> str:
+        """Build the trigger-button text from a sort key (e.g. 'Created at  ▴')."""
+        opt = _get_sort_option(sort_key)
+        return f"{opt['label']}  {opt['arrow']}"
+
+    def _refresh_sort_btn_label(self):
+        """Update the trigger button text to reflect the current tab's sort.
+
+        Reads the saved sort key for the active tab from self._sort_prefs
+        — the active tab can be a genre name or "New Releases" — and renders
+        the label + arrow combo on the trigger button.
+        """
+        if not hasattr(self, "_sort_btn"):
+            return
+        genre = self._genre_var.get()
+        sort_key = self._sort_prefs.get(genre, DEFAULT_SORT_KEY)
+        self._sort_btn.config(text=self._format_sort_btn_label(sort_key))
+
+    def _show_sort_control(self, visible: bool):
+        """Show or hide the entire sort control (label + button).
+
+        Hidden only on the "All Movies" tab — that's a multi-genre overview
+        and doesn't have a single sort context. Shown on every single-genre
+        tab and on the "New Releases" tab; each tab keeps its own sort
+        preference in self._sort_prefs (persisted to sort_preferences.json).
+        """
+        if not hasattr(self, "_sort_control_frame"):
+            return
+        if visible:
+            if not self._sort_control_frame.winfo_ismapped():
+                self._sort_control_frame.pack(side=tk.RIGHT)
+        else:
+            self._sort_control_frame.pack_forget()
+            self._close_sort_dropdown()
+
+    def _toggle_sort_dropdown(self):
+        """Open or close the sort dropdown popup."""
+        if getattr(self, "_sort_dropdown_open", False):
+            self._close_sort_dropdown()
+        else:
+            self._open_sort_dropdown()
+
+    def _open_sort_dropdown(self):
+        """Show a Toplevel popup styled like a native dropdown.
+
+        Layout: positioned with its top-left aligned so the popup's right
+        edge meets the trigger button's right edge, top edge sits 2px below
+        the button. Six rows in three pairs (Name / Created at / Last edited)
+        with thin dividers between pairs. Currently selected option is
+        highlighted in cyan; hover gives a subtle brighter background.
+
+        Implementation notes:
+          - We use overrideredirect + withdraw + deiconify because Windows
+            otherwise ignores the position part of geometry() when a window
+            is mid-transition between decorated and undecorated state. The
+            "withdraw, set geometry, deiconify" pattern shows the popup at
+            the correct coordinates in one frame.
+          - Click-outside-to-close is bound app-wide on root with a small
+            timestamp guard so the same click that OPENED the popup doesn't
+            bubble back to the handler and immediately close it.
+        """
+        if getattr(self, "_sort_dropdown_open", False):
+            return
+
+        # Resolve the trigger button's screen position so we can pin the popup.
+        btn = self._sort_btn
+        btn.update_idletasks()
+        bx = btn.winfo_rootx()
+        by = btn.winfo_rooty()
+        bw = btn.winfo_width()
+        bh = btn.winfo_height()
+
+        # Build the popup window — withdraw it first so layout work happens
+        # off-screen and the user only sees the final positioned popup.
+        pop = tk.Toplevel(self.root)
+        pop.withdraw()
+        pop.overrideredirect(True)
+        pop.transient(self.root)
+        pop.configure(bg=DS["border"])     # acts as a 1px outline
+        pop.attributes("-topmost", True)
+
+        inner = tk.Frame(pop, bg=DS["panel"])
+        inner.pack(padx=1, pady=1)
+
+        genre = self._genre_var.get()
+        current_key = self._sort_prefs.get(genre, DEFAULT_SORT_KEY)
+
+        # SORT_OPTIONS is defined as (asc, desc) per field. The visual spec
+        # shows descending arrow (▾) above ascending (▴) within each pair,
+        # so swap the order for display.
+        display_pairs = [
+            (SORT_OPTIONS[1], SORT_OPTIONS[0]),  # Name        ▾, ▴
+            (SORT_OPTIONS[3], SORT_OPTIONS[2]),  # Created at  ▾, ▴
+            (SORT_OPTIONS[5], SORT_OPTIONS[4]),  # Last edited ▾, ▴
+        ]
+
+        def _make_row(parent, opt):
+            """Build one option row with hover, click, and active highlight."""
+            is_active = (opt["key"] == current_key)
+            normal_bg = "#1A2230" if is_active else DS["panel"]
+            hover_bg  = "#243149" if is_active else "#161D27"
+            text_fg   = DS["cyan"] if is_active else DS["text"]
+
+            row = tk.Frame(parent, bg=normal_bg, cursor="hand2")
+            row.pack(fill=tk.X)
+
+            lbl = tk.Label(row, text=opt["label"],
+                           font=_vcr(10, bold=is_active),
+                           fg=text_fg, bg=normal_bg, anchor="w", padx=12, pady=6)
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            arr = tk.Label(row, text=opt["arrow"],
+                           font=_vcr(10, bold=is_active),
+                           fg=text_fg, bg=normal_bg, padx=12)
+            arr.pack(side=tk.RIGHT)
+
+            def _enter(_e=None):
+                for w_ in (row, lbl, arr):
+                    w_.config(bg=hover_bg)
+
+            def _leave(_e=None):
+                for w_ in (row, lbl, arr):
+                    w_.config(bg=normal_bg)
+
+            def _click(_e=None):
+                self._on_sort_selected(opt["key"])
+
+            for w_ in (row, lbl, arr):
+                w_.bind("<Enter>", _enter)
+                w_.bind("<Leave>", _leave)
+                w_.bind("<Button-1>", _click)
+
+        for pair_idx, (top, bottom) in enumerate(display_pairs):
+            _make_row(inner, top)
+            _make_row(inner, bottom)
+            # Thin separator between pairs (none after the last pair)
+            if pair_idx < len(display_pairs) - 1:
+                tk.Frame(inner, bg=DS["divider"], height=1).pack(fill=tk.X)
+
+        # Resolve the popup's required size (winfo_reqwidth/height work
+        # before the window is mapped; winfo_width returns 1 in that state).
+        pop.update_idletasks()
+        pw = pop.winfo_reqwidth()
+        ph = pop.winfo_reqheight()
+
+        # Right-align: popup's right edge aligned to button's right edge,
+        # top sits 2px below the button.
+        x = bx + bw - pw
+        y = by + bh + 2
+
+        # Set BOTH size and position while withdrawn, then show.
+        pop.geometry(f"{pw}x{ph}+{x}+{y}")
+        pop.deiconify()
+        pop.lift()
+
+        self._sort_dropdown = pop
+        self._sort_dropdown_open = True
+
+        # Click-outside-to-close. We bind app-wide on root rather than
+        # per-widget because we want clicks anywhere outside the popup to
+        # close it. Timestamp guard skips events within 200ms of opening,
+        # which prevents the original trigger click — still bubbling
+        # through the queue — from being seen as an outside click.
+        import time as _t
+        self._sort_open_at = _t.monotonic()
+
+        def _outside(event):
+            if _t.monotonic() - self._sort_open_at < 0.2:
+                return
+            try:
+                w_target = pop.winfo_containing(event.x_root, event.y_root)
+            except Exception:
+                w_target = None
+            # Walk up the widget tree — if we find the popup, click was inside.
+            p = w_target
+            while p is not None:
+                if p is pop:
+                    return
+                p = p.master if hasattr(p, "master") else None
+            self._close_sort_dropdown()
+
+        self._sort_outside_bind_id = self.root.bind_all(
+            "<Button-1>", _outside, add="+")
+        self._sort_escape_bind_id = self.root.bind_all(
+            "<Escape>", lambda e: self._close_sort_dropdown(), add="+")
+
+    def _close_sort_dropdown(self):
+        """Tear down the sort dropdown popup and release its bindings.
+
+        Safe to call even if the popup isn't currently open. Called from
+        _on_sort_selected (after a choice is made), the click-outside
+        handler, the Escape handler, and on tab/genre changes.
+        """
+        if not getattr(self, "_sort_dropdown_open", False):
+            return
+        # Release the app-wide button-1 / escape bindings. unbind_all is safe
+        # here because no other code in this app installs app-wide handlers
+        # for these events.
+        try:
+            if getattr(self, "_sort_outside_bind_id", None):
+                self.root.unbind_all("<Button-1>")
+                self._sort_outside_bind_id = None
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_sort_escape_bind_id", None):
+                self.root.unbind_all("<Escape>")
+                self._sort_escape_bind_id = None
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_sort_dropdown", None):
+                self._sort_dropdown.destroy()
+        except Exception:
+            pass
+        self._sort_dropdown = None
+        self._sort_dropdown_open = False
+
+    def _on_sort_selected(self, sort_key: str):
+        """Apply a user-chosen sort option for the active tab.
+
+        Persists the choice to sort_preferences.json (per-tab — the active
+        tab can be a genre name or "New Releases"), updates the trigger
+        button label, and triggers the dim/reorder animation. Does nothing
+        if the user picked the option that's already active.
+        """
+        self._close_sort_dropdown()
+        genre = self._genre_var.get()
+        if self._sort_prefs.get(genre, DEFAULT_SORT_KEY) == sort_key:
+            return
+        self._sort_prefs[genre] = sort_key
+        save_sort_prefs(self._sort_prefs)
+        self._refresh_sort_btn_label()
+        self._sort_animate_reorder()
+
+    def _sort_animate_reorder(self):
+        """Brief dim → repopulate → un-dim transition (~150ms total).
+
+        Tkinter has no native alpha so we approximate a fade by briefly
+        switching the shelf canvas background to a darker tone, repopulating
+        the shelf with the new sort applied, then restoring the normal color.
+        Timing: 80ms dim → repopulate → 70ms restore.
+        """
+        try:
+            canvas = self._shelf_canvas
+            normal_bg = canvas.cget("bg")
+            dim_bg = "#0A0A0A"   # slightly darker than the normal canvas bg
+            canvas.config(bg=dim_bg)
+            self._shelf_frame.config(bg=dim_bg)
+        except Exception:
+            normal_bg = None
+
+        def _phase2():
+            # Re-render with new sort applied
+            try:
+                self._populate_shelf()
+            except Exception as e:
+                print(f"[sort] populate error: {e}")
+            # Restore colors after a short delay so the dim is perceptible
+            def _restore():
+                try:
+                    if normal_bg is not None:
+                        self._shelf_canvas.config(bg=normal_bg)
+                        self._shelf_frame.config(bg=normal_bg)
+                except Exception:
+                    pass
+            self.root.after(70, _restore)
+
+        self.root.after(80, _phase2)
+
     # ── Populate Shelf (tile gallery) ─────────────────────────
+    #
+    # IMPORTANT NOTE FOR ANY AI / DEVELOPER READING THIS:
+    # ====================================================
+    # The shelf in this tool ONLY shows user-created custom slots.
+    # Base game movies are NEVER displayed in the shelf, even though they
+    # exist in the underlying DataTables. This is because the tool runs in
+    # CUSTOM_ONLY_MODE = True, which filters out all base T_Bkg slots from
+    # the shelf and only shows slots the user has personally created.
+    # The presence of T_Bkg_<Genre>_001..N entries does NOT mean those are
+    # base game movies — those are user-created custom slots using the
+    # 3-digit naming convention. Base game uses 2-digit names like T_Bkg_Hor_01.
+    # Don't ever assume the shelf includes base game movies. It does not.
+    # Sort logic, filter logic, and any iteration over what the user sees
+    # in the shelf operates on custom slots only.
+    # ====================================================
     def _populate_shelf(self, *args):
         self._genre_header_widgets = []
         for w in self._shelf_frame.winfo_children():
@@ -9952,9 +10640,13 @@ class VHSToolApp:
                     self._add_tile_row(body_f, genre_movies)
                     self._make_add_movie_row(body_f, g)
         elif genre == "New Releases":
-            # Show NR slots as a simple list
+            # Show NR slots as a simple list, sorted per persisted preference.
+            # The original NR_SLOT_DATA index must be preserved through sorting
+            # because the click handler uses it to call _select_nr_slot(idx).
             sel_idx = getattr(self, '_selected_nr_idx', -1)
-            for idx, nr in enumerate(NR_SLOT_DATA):
+            sort_key = self._sort_prefs.get("New Releases", DEFAULT_SORT_KEY)
+            sorted_nrs = _sort_nr_slots(list(enumerate(NR_SLOT_DATA)), sort_key)
+            for idx, nr in sorted_nrs:
                 is_sel = (idx == sel_idx)
                 row_bg = DS["panel"] if is_sel else DS["surface"]
                 row_f = tk.Frame(self._shelf_frame, bg=row_bg,
@@ -9991,7 +10683,11 @@ class VHSToolApp:
 
 
         else:
-            self._add_tile_row(self._shelf_frame, self.filtered)
+            # Single-genre tab: apply the tab's saved sort preference.
+            # NR tab is handled in its own branch above, this is genre-only.
+            sort_key = self._sort_prefs.get(genre, DEFAULT_SORT_KEY)
+            sorted_filtered = _sort_textures(self.filtered, sort_key)
+            self._add_tile_row(self._shelf_frame, sorted_filtered)
 
         # Refresh tab counts and sticky button
         self._update_tab_colors(self._genre_var.get())
@@ -10242,6 +10938,10 @@ class VHSToolApp:
 
     def _on_select_texture(self, texture):
         """Handle selection of a texture tile."""
+        # Commit pending last_edited_at for the slot being navigated AWAY from.
+        # Both flushes are no-ops if nothing was flagged dirty.
+        self._flush_pending_edit_timestamp()
+        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
         self.selected = texture
         self._selected_nr_idx = -1
         self._auto_fit = False
@@ -13017,6 +13717,9 @@ class VHSToolApp:
         return dest
 
     def _build(self):
+        # Commit any pending last_edited_at timestamps before we serialize everything.
+        self._flush_pending_edit_timestamp()
+        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
         # Allow build even with no replacements if there are custom slots
         has_custom = any(
             len(slots) > GENRES[g]["bkg"]
