@@ -3,12 +3,16 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
+import '../../data/datasources/custom_slots_data_source.dart';
 import '../../data/datasources/json_file_data_source.dart';
+import '../../data/datasources/replacements_data_source.dart';
+import '../../data/datatable/slot_data.dart';
 import '../../data/repositories/config_repository_impl.dart';
 import '../../data/repositories/pak_builder_impl.dart';
 import '../../data/repositories/texture_repository_impl.dart';
 import '../../domain/entities/app_config.dart';
 import '../../domain/entities/texture.dart';
+import '../../domain/entities/texture_replacement.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
 import '../../domain/repositories/texture_repository.dart';
@@ -54,6 +58,22 @@ final configFutureProvider = FutureProvider<AppConfig>((ref) {
 
 final texturesProvider = Provider<List<Texture>>((ref) {
   return ref.watch(textureRepositoryProvider).buildTextureList();
+});
+
+/// Per-DataTable list of custom slots, sourced from `custom_slots.json`.
+/// Reactive: invalidate this provider after edits to refresh the UI.
+final customSlotsProvider =
+    FutureProvider<Map<String, List<SlotData>>>((ref) async {
+  final dir = ref.watch(workingDirProvider);
+  return CustomSlotsDataSource(dir).load();
+});
+
+/// Per-texture replacement entries, sourced from `replacements.json`.
+/// Reactive in the same way as [customSlotsProvider].
+final replacementsProvider =
+    FutureProvider<Map<String, TextureReplacement>>((ref) async {
+  final dir = ref.watch(workingDirProvider);
+  return ReplacementsDataSource(dir).load();
 });
 
 class BuildState {

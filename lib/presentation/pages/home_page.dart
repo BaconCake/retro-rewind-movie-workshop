@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
+import '../providers/providers.dart';
 import '../widgets/build_panel.dart';
 import '../widgets/genre_sidebar.dart';
 import '../widgets/texture_grid.dart';
@@ -21,6 +22,16 @@ class _HomePageState extends ConsumerState<HomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('RR Movie Workshop'),
+        actions: [
+          IconButton(
+            tooltip: 'Reload custom_slots.json + replacements.json',
+            icon: const Icon(Icons.refresh),
+            onPressed: () {
+              ref.invalidate(customSlotsProvider);
+              ref.invalidate(replacementsProvider);
+            },
+          ),
+        ],
       ),
       body: Row(
         children: [
