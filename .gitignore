@@ -1,77 +1,24 @@
-# =============================================================================
-# Retro Rewind Movie Workshop — .gitignore
-# =============================================================================
-# Repo holds:  the Python source, the README, LICENSE, build spec/scripts,
-#              the GitHub Actions workflow, and any reference docs.
-# Everything else listed below is local — generated at runtime, downloaded
-# separately, or specific to one developer's machine. None of it should
-# ever land in a commit.
-# =============================================================================
-
-# ── User data created by the tool at runtime ────────────────────────────
-# These hold the user's custom movies, settings, sort prefs, etc. They live
-# next to the exe in production; ignoring them here means a developer can
-# safely run the tool from inside their cloned repo without polluting commits.
-config.json
-custom_slots.json
-nr_custom_slots.json
-replacements.json
-title_changes.json
-base_slot_edits.json
-edited_slots.json
-shipped_slots.json
-sort_preferences.json
-
-# ── Backups created by the tool ─────────────────────────────────────────
-*.json.bak
-
-# ── Generated runtime folders ───────────────────────────────────────────
-Output/
-layout_cache/
-_pak_cache/
-
-# ── Generated images and runtime caches ─────────────────────────────────
-# The tool creates layout previews, thumbnails, and asset PNGs at runtime.
-# Real assets that ship with the repo (if any) should be placed in a
-# specifically-named folder (e.g. assets/) and added back via a "!" rule.
-*.png
-*.jpg
-*.jpeg
-*.webp
-
-# ── PyInstaller build artifacts ─────────────────────────────────────────
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
 build/
-dist/
-*.spec.bak
+pubspec.lock
 
-# ── Python build cache ──────────────────────────────────────────────────
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# ── Third-party tools (downloaded by users / CI, not source) ────────────
-tools/repak.exe
-tools/texconv.exe
-repak.exe
-texconv.exe
-
-# ── Personal launcher (each dev has their own) ──────────────────────────
-run_workshop.bat
-
-# ── IDE / OS junk ───────────────────────────────────────────────────────
-.vscode/
+# IDE
 .idea/
-*.swp
-*.swo
-Thumbs.db
+.vscode/
+*.iml
+
+# OS
 .DS_Store
+Thumbs.db
 
-# ── Virtual environments ────────────────────────────────────────────────
-venv/
-.venv/
-env/
-.env
-
-# ── Logs ────────────────────────────────────────────────────────────────
-*.log
+# Project — local artifacts and per-machine config
+config.json
+build_work/
+.pak_cache/
+zzzzzz_MovieWorkshop_P.pak

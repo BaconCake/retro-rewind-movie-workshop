@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Test-Path *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(flutter create *)",
+      "PowerShell(flutter *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(git *)"
+    ]
+  }
+}

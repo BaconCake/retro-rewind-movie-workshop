@@ -1,0 +1,3 @@
+- [Project: RR Movie Workshop](project_rr_movie_workshop.md) — Flutter desktop port of RR_VHS_Tool.py, sliced rollout per MIGRATION.md
+- [Genre relevance — Adventure unused](project_genres.md) — Adventure parses but is not used in-game; deprioritise its edge cases
+- [User language preference](user_language.md) — replies in German unless user switches

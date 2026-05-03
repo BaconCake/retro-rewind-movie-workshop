@@ -1,53 +1,72 @@
-# Retro Rewind Movie Workshop
+# RR Movie Workshop
 
-Custom VHS cover art and New Release standee tool for [Retro Rewind](https://store.steampowered.com/app/2427940/Retro_Rewind/) (Steam).
+Retro Rewind Movie Workshop — Flutter desktop port of the original
+`RR_VHS_Tool.py` modding tool.
 
-## What it does
+> The original Python tool is preserved on the **`legacy-python`** branch
+> of this repository.
 
-A standalone GUI tool that lets you replace VHS cover art and create custom New Release standees across all 12 genres. No modding knowledge required — upload images, customize details, click "Ship to Store" and the tool generates a ready-to-play `.pak` mod file.
+## Status
 
-- Up to 999 movies per genre (~13,000 total)
-- Custom New Release standees for 11 genres
-- Visual editor with layout preview matching in-game rendering
-- One-click build — outputs a single `.pak` file directly to your game's `~mods` folder
+Sliced rollout per [`MIGRATION.md`](MIGRATION.md). Slice progress:
 
-## Requirements
+| Slice | Scope                                                              | Status |
+| ----- | ------------------------------------------------------------------ | ------ |
+| 1     | Toolchain wiring (config → repak → install passthrough pak)        | Done   |
+| 2a    | Real `AssetRegistry.bin` extraction                                | Done   |
+| 2b    | `PakCache` as unified extraction service                           | Done   |
+| 2c    | Full DataTable rebuild (parser + builder + manager + integration)  | Done   |
+| 3     | Texture injection (texconv + DXT1 + uasset clone)                  | Open   |
+| 4     | Preview canvas + slot-editing UI                                   | Open   |
+| 5     | NewRelease / standees                                              | Open   |
+| 6     | Setup dialog                                                       | Open   |
 
-- Windows PC
-- Python 3.10+ with Pillow (`pip install pillow`)
-- [repak.exe](https://github.com/trumank/repak/releases/latest) — pak file operations
-- [texconv.exe](https://github.com/microsoft/DirectXTex/releases/latest) — texture conversion
-- Retro Rewind (Steam version)
+See `MIGRATION.md` for architecture, deferral table, and design notes.
 
-## Running from source
+## Prerequisites
+
+- **Flutter** 3.22+ with desktop support enabled
+  (`flutter config --enable-windows-desktop` on Windows).
+- **`repak.exe`** and **`texconv.exe`** binaries (same ones the Python
+  tool used).
+- **`RetroRewind-Windows.pak`** — the base game pak.
+- The game's **`~mods`** folder.
+
+## Configuration
+
+Drop a `config.json` next to the executable (or in the project root for
+`flutter run`). Schema:
+
+```json
+{
+  "texconv": "C:/path/to/texconv.exe",
+  "repak":   "C:/path/to/repak.exe",
+  "base_game_pak": "C:/.../RetroRewind-Windows.pak",
+  "mods_folder":   "C:/.../~mods"
+}
+```
+
+`config.json` is **gitignored** — paths are per-machine.
+
+## Run
+
+```powershell
+flutter pub get
+flutter run -d windows
+```
+
+## Test
+
+```powershell
+flutter test
+```
+
+## Layout
 
 ```
-pip install pillow
-python RR_VHS_Tool.py
+lib/
+├── core/          # constants (genres, error codes), pure utilities
+├── domain/        # entities + abstract repositories (no Flutter / IO)
+├── data/          # IO, JSON DTOs, subprocess, repository impls
+└── presentation/  # Riverpod providers, pages, widgets
 ```
-
-Place `repak.exe` and `texconv.exe` in the same folder or in a `tools/` subfolder. The tool auto-detects them on first launch.
-
-## Building the executable
-
-```
-pip install pyinstaller pillow
-build.bat
-```
-
-Output goes to `dist/RR_Movie_Workshop/`.
-
-## Download
-
-Pre-built releases with all tools included are available on [Nexus Mods](https://www.nexusmods.com/retrorewindvideostoresimulator/mods/82).
-
-## License
-
-MIT License — see [LICENSE](LICENSE)
-
-## Credits
-
-- Tool by MagicMastaBlasta
-- Thanks to Omniscye / Empress for the Real Movies Mod reference
-- repak by Truman Kilen & spuds (MIT License)
-- texconv by Microsoft / DirectXTex (MIT License)
