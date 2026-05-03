@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
+import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
@@ -26,18 +27,25 @@ class TextureGrid extends ConsumerWidget {
     final replacements = ref.watch(replacementsProvider);
 
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(kSp3),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(genre.name,
-              style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 4),
+          Text(
+            genre.name.toUpperCase(),
+            style: const TextStyle(
+              fontSize: kFsApp,
+              fontWeight: FontWeight.w700,
+              color: kColorCyan,
+              letterSpacing: 1.5,
+            ),
+          ),
+          const SizedBox(height: kSp1),
           Text(
             'Slots in this genre that will be written to the mod pak.',
-            style: Theme.of(context).textTheme.bodySmall,
+            style: const TextStyle(fontSize: kFsMeta, color: kColorText3),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: kSp3),
           Expanded(
             child: customSlots.when(
               loading: () =>
@@ -72,13 +80,15 @@ class _SlotGrid extends StatelessWidget {
       return Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 360),
-          child: Text(
-            'No custom slots for this genre.\n\n'
+          child: const Text(
+            'NO CUSTOM SLOTS\n\n'
             'The mod pak leaves the base game’s movies untouched here.',
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+            style: TextStyle(
+              fontSize: kFsBody,
+              color: kColorText3,
+              height: 1.4,
+            ),
           ),
         ),
       );
@@ -87,10 +97,9 @@ class _SlotGrid extends StatelessWidget {
     return GridView.builder(
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 180,
-        // Card aspect: 0.5 cover + ~80px metadata strip → tweak by trial.
         childAspectRatio: 0.55,
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
+        crossAxisSpacing: kSp3,
+        mainAxisSpacing: kSp3,
       ),
       itemCount: slots.length,
       itemBuilder: (context, i) {
@@ -112,60 +121,60 @@ class _SlotCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hasImage = replacement != null;
+    // Outer border: pink accent if a custom image is wired up (matches
+    // Python's "list row custom" rule), neutral border otherwise.
+    final borderColor = hasImage ? kColorPink : kColorBorder;
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.outlineVariant,
-        ),
+        color: kColorPanel,
+        border: Border.all(color: borderColor),
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Image takes whatever vertical space is left after the metadata
-          // strip claims its natural height.  AspectRatio still tries for
-          // 1:2 cover shape — if the cell is too short for that, the image
-          // is just letter-boxed centre.  Avoids the column overflow that
-          // would happen with a hard 1:2 ratio inside a fixed-aspect cell.
           Expanded(
             child: AspectRatio(
-              aspectRatio: 1024 / 2048, // matches T_Bkg dimensions
+              aspectRatio: 1024 / 2048,
               child: _Thumbnail(replacement: replacement),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          Container(
+            padding: const EdgeInsets.fromLTRB(kSp2, kSp1, kSp2, kSp2),
+            decoration: const BoxDecoration(
+              color: kColorPanel,
+              border: Border(top: BorderSide(color: kColorBorder)),
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
                   slot.pnName.isEmpty ? '(untitled)' : slot.pnName,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
+                  style: const TextStyle(
+                    fontSize: kFsMeta,
+                    fontWeight: FontWeight.w700,
+                    color: kColorText,
+                  ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 2),
                 Text(
                   slot.bkgTex,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        fontFamily: 'monospace',
-                        color:
-                            Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
+                  style: const TextStyle(
+                    fontSize: kFsMeta,
+                    color: kColorText3,
+                  ),
                 ),
                 if (slot.sku != 0)
                   Text(
                     'SKU ${slot.sku}',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .onSurfaceVariant,
-                        ),
+                    style: const TextStyle(
+                      fontSize: kFsMeta,
+                      color: kColorText3,
+                    ),
                   ),
               ],
             ),
@@ -226,34 +235,36 @@ class _Placeholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final bg = isError ? scheme.errorContainer : scheme.surfaceContainerHighest;
-    final fg = isError ? scheme.onErrorContainer : scheme.onSurfaceVariant;
+    final fg = isError ? kColorPink : kColorText3;
     return Container(
-      color: bg,
-      padding: const EdgeInsets.all(8),
+      color: kColorBg,
+      padding: const EdgeInsets.all(kSp2),
       alignment: Alignment.center,
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-              isError
-                  ? Icons.broken_image_outlined
-                  : Icons.image_not_supported_outlined,
-              color: fg),
-          const SizedBox(height: 4),
+            isError
+                ? Icons.broken_image_outlined
+                : Icons.image_not_supported_outlined,
+            color: fg,
+            size: 28,
+          ),
+          const SizedBox(height: kSp1),
           Text(
             label,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: fg,
-                  fontWeight: FontWeight.w600,
-                ),
+            style: TextStyle(
+              fontSize: kFsMeta,
+              fontWeight: FontWeight.w700,
+              color: fg,
+              letterSpacing: 1,
+            ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 2),
           Text(
             sublabel,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg),
+            style: TextStyle(fontSize: kFsMeta, color: fg),
             textAlign: TextAlign.center,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
@@ -272,14 +283,14 @@ class _ErrorBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(kSp3),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(4),
+        color: kColorPanel,
+        border: Border.all(color: kColorPink),
       ),
       child: Text(
         'Could not load slot data: $message',
-        style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer),
+        style: const TextStyle(color: kColorPink, fontSize: kFsBody),
       ),
     );
   }
