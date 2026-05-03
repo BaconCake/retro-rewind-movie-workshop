@@ -39,6 +39,26 @@ const List<StarOption> kStarOptions = [
   StarOption(label: '0.0 ★  Bad Critic',  last2: 2),
 ];
 
+/// Half-star rating → SKU `last2`. Mirrors Python's `STARS_TO_LAST2`
+/// (RR_VHS_Tool.py:8520-8521). 3.0 is rejected → snaps to 2.5 (matches
+/// Python's `_x_to_val` behaviour, RR_VHS_Tool.py:8454-8460). Returns 53
+/// (3.5★) for any input outside the half-step grid as a safety net.
+int starsToLast2(double stars) {
+  // Snap 3.0 → 2.5 first; Python explicitly rejects 3.0.
+  final s = stars == 3.0 ? 2.5 : stars;
+  if (s == 5.0) return 0;
+  if (s == 4.5) return 93;
+  if (s == 4.0) return 83;
+  if (s == 3.5) return 53;
+  if (s == 2.5) return 33;
+  if (s == 2.0) return 23;
+  if (s == 1.5) return 22;
+  if (s == 1.0) return 12;
+  if (s == 0.5) return 3;
+  if (s == 0.0) return 2;
+  return 53;
+}
+
 /// One entry in the "Rarity" dropdown. Mirrors `RARITY_OPTIONS` —
 /// RR_VHS_Tool.py:1730-1735.
 class Rarity {

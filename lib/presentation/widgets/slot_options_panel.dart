@@ -8,6 +8,8 @@ import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/sku.dart';
 import '../providers/providers.dart';
+import 'rarity_picker.dart';
+import 'star_rating_picker.dart';
 
 /// Right-hand operations column.
 ///
@@ -148,35 +150,14 @@ class _SlotForm extends ConsumerWidget {
     return s;
   }
 
-  /// Pick the StarOption whose last2 is closest to the slot's current SKU.
-  /// Mirrors Python's `min(star_labels, key=lambda l: abs(...))`
-  /// (RR_VHS_Tool.py:12901-12902).
-  StarOption _currentStar() {
-    final last2 = slot.sku % 100;
-    return kStarOptions.reduce(
-      (a, b) =>
-          (a.last2 - last2).abs() <= (b.last2 - last2).abs() ? a : b,
-    );
-  }
+  /// Decode the slot's SKU into the half-star rating the picker shows.
+  /// Mirrors Python's `sku_to_info` (RR_VHS_Tool.py:1869-1880).
+  double _currentStars() => skuToInfo(slot.sku).stars;
 
   Future<void> _commitTitle(WidgetRef ref, String v) async {
     if (v == slot.pnName) return;
     await ref.read(slotsControllerProvider).updateSlot(
           slot.copyWith(pnName: v),
-        );
-  }
-
-  Future<void> _commitLs(WidgetRef ref, int v) async {
-    if (v == slot.ls) return;
-    await ref.read(slotsControllerProvider).updateSlot(
-          slot.copyWith(ls: v),
-        );
-  }
-
-  Future<void> _commitLsc(WidgetRef ref, int v) async {
-    if (v == slot.lsc) return;
-    await ref.read(slotsControllerProvider).updateSlot(
-          slot.copyWith(lsc: v),
         );
   }
 
@@ -201,7 +182,7 @@ class _SlotForm extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final currentStar = _currentStar();
+    final currentStars = _currentStars();
     final currentRarity = skuToRarity(slot.sku);
 
     return Column(
@@ -215,46 +196,93 @@ class _SlotForm extends ConsumerWidget {
         _OptionRow(label: 'Texture', value: slot.bkgTex),
         if (slot.subTex != null)
           _OptionRow(label: 'Subject', value: slot.subTex!),
-        _SlotIntDropdown(
-          label: 'Layout style',
-          value: slot.ls.clamp(1, 5),
-          options: const [1, 2, 3, 4, 5],
-          onChanged: (v) => _commitLs(ref, v),
-        ),
-        _SlotIntDropdown(
-          label: 'Layout color',
-          value: slot.lsc.clamp(1, 10),
-          options: const [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-          onChanged: (v) => _commitLsc(ref, v),
-        ),
-        _SlotChoiceDropdown<StarOption>(
-          label: 'Star rating',
-          value: currentStar,
-          options: kStarOptions,
-          labelOf: (o) => o.label,
-          onChanged: (s) =>
-              _regenerateSku(ref, last2: s.last2, rarity: currentRarity),
-        ),
-        _SlotChoiceDropdown<Rarity>(
-          label: 'Rarity',
-          value: currentRarity,
-          options: Rarity.all,
-          labelOf: (r) => r.label,
-          onChanged: (r) =>
-              _regenerateSku(ref, last2: currentStar.last2, rarity: r),
-        ),
-        _OptionRow(
-          label: 'SKU',
-          value: '${slot.sku}    ${skuDisplay(slot.sku)}',
+        const SizedBox(height: kSp2),
+        const _SubHeader('STAR RATING'),
+        const SizedBox(height: kSp1),
+        StarRatingPicker(
+          value: currentStars,
+          onChanged: (stars) => _regenerateSku(
+            ref,
+            last2: starsToLast2(stars),
+            rarity: currentRarity,
+          ),
         ),
         const SizedBox(height: kSp3),
-        const _SectionHeader('USER IMAGE'),
+        const _SubHeader('RARITY'),
+        const SizedBox(height: kSp1),
+        RarityPicker(
+          value: currentRarity,
+          onChanged: (r) => _regenerateSku(
+            ref,
+            last2: starsToLast2(currentStars),
+            rarity: r,
+          ),
+        ),
+        const SizedBox(height: kSp3),
+        const _SubHeader('CATALOG ID'),
+        const SizedBox(height: kSp1),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: Text(
+                '${slot.sku}',
+                style: const TextStyle(fontSize: kFsBody, color: kColorText),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Copy catalog ID',
+              visualDensity: VisualDensity.compact,
+              color: kColorText2,
+              icon: const Icon(Icons.content_copy, size: 14),
+              onPressed: () async {
+                await Clipboard.setData(
+                    ClipboardData(text: '${slot.sku}'));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Catalog ID copied'),
+                      duration: Duration(seconds: 1),
+                    ),
+                  );
+                }
+              },
+            ),
+          ],
+        ),
+        Text(
+          skuDisplay(slot.sku),
+          style: const TextStyle(fontSize: kFsMeta, color: kColorText3),
+        ),
+        const SizedBox(height: kSp3),
+        const _SubHeader('USER IMAGE'),
         const SizedBox(height: kSp2),
         _UserImageControls(
           bkgTex: slot.bkgTex,
           currentPath: repl?.path as String?,
         ),
       ],
+    );
+  }
+}
+
+/// Sub-header inside the slot form (e.g. STAR RATING / RARITY / CATALOG ID).
+/// Same visual treatment as [_SectionHeader] but distinct widget so the
+/// outer "SLOT OPTIONS" header keeps its top-of-panel role.
+class _SubHeader extends StatelessWidget {
+  final String label;
+  const _SubHeader(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        fontSize: kFsMeta,
+        fontWeight: FontWeight.w700,
+        color: kColorCyan,
+        letterSpacing: 1.5,
+      ),
     );
   }
 }
@@ -337,91 +365,6 @@ class _SlotTextFieldState extends State<_SlotTextField> {
         style: const TextStyle(fontSize: kFsBody, color: kColorText),
         onSubmitted: (_) => _commit(),
         onTapOutside: (_) => _commit(),
-      ),
-    );
-  }
-}
-
-/// Small-range integer dropdown — used for Layout Style (1–5) and
-/// Layout Color (1–10), matching Python's Spinbox controls.
-class _SlotIntDropdown extends StatelessWidget {
-  final String label;
-  final int value;
-  final List<int> options;
-  final ValueChanged<int> onChanged;
-
-  const _SlotIntDropdown({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _FieldShell(
-      label: label,
-      child: DropdownButtonFormField<int>(
-        initialValue: value,
-        isDense: true,
-        decoration: const InputDecoration(isDense: true),
-        style: const TextStyle(fontSize: kFsBody, color: kColorText),
-        dropdownColor: kColorPanel,
-        items: [
-          for (final v in options)
-            DropdownMenuItem(value: v, child: Text('$v')),
-        ],
-        onChanged: (v) {
-          if (v != null) onChanged(v);
-        },
-      ),
-    );
-  }
-}
-
-/// Generic dropdown of arbitrary objects — used for Star Rating
-/// (StarOption) and Rarity (Rarity). Equality on `T` decides which item
-/// is "selected", so callers should pass canonical instances (e.g. the
-/// `kStarOptions` constants, not freshly built copies).
-class _SlotChoiceDropdown<T> extends StatelessWidget {
-  final String label;
-  final T value;
-  final List<T> options;
-  final String Function(T) labelOf;
-  final ValueChanged<T> onChanged;
-
-  const _SlotChoiceDropdown({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.labelOf,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _FieldShell(
-      label: label,
-      child: DropdownButtonFormField<T>(
-        initialValue: value,
-        isDense: true,
-        isExpanded: true,
-        decoration: const InputDecoration(isDense: true),
-        style: const TextStyle(fontSize: kFsBody, color: kColorText),
-        dropdownColor: kColorPanel,
-        items: [
-          for (final o in options)
-            DropdownMenuItem(
-              value: o,
-              child: Text(
-                labelOf(o),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-        ],
-        onChanged: (v) {
-          if (v != null) onChanged(v);
-        },
       ),
     );
   }

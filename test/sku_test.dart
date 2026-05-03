@@ -7,6 +7,37 @@ import 'package:rr_movie_workshop/domain/sku.dart';
 /// from in-game data (34/34 confirmed for stars, 36 confirmed for Old/holo)
 /// but never tested its own implementation. Port + tests pin both.
 void main() {
+  group('starsToLast2', () {
+    test('every valid half-star maps to its STAR_OPTIONS last2', () {
+      // (stars, expected last2) pairs — list of records avoids the
+      // "double-key in const map" lint.
+      final cases = <(double, int)>[
+        (5.0, 0),
+        (4.5, 93),
+        (4.0, 83),
+        (3.5, 53),
+        (2.5, 33),
+        (2.0, 23),
+        (1.5, 22),
+        (1.0, 12),
+        (0.5, 3),
+        (0.0, 2),
+      ];
+      for (final (stars, last2) in cases) {
+        expect(starsToLast2(stars), last2, reason: 'stars=$stars');
+      }
+    });
+
+    test('3.0 snaps to 2.5 (Python explicitly rejects 3.0)', () {
+      expect(starsToLast2(3.0), 33);
+    });
+
+    test('falls back to 53 (3.5★) for off-grid input', () {
+      expect(starsToLast2(2.7), 53);
+      expect(starsToLast2(99.0), 53);
+    });
+  });
+
   group('skuToInfo', () {
     test('every STAR_OPTIONS last2 round-trips to its star rating', () {
       // Each StarOption.last2 should decode back to the leading number in

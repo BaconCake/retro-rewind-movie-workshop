@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../providers/providers.dart';
+import 'layout_style_picker.dart';
 
 /// Center column of the main layout: a large preview of the currently
 /// selected slot's cover (or a "select a slot" hint when none is picked).
@@ -71,6 +72,16 @@ class SlotPreview extends ConsumerWidget {
           Text(
             slot.bkgTex,
             style: const TextStyle(fontSize: kFsMeta, color: kColorText3),
+          ),
+          const SizedBox(height: kSp3),
+          LayoutStylePicker(
+            value: slot.ls.clamp(1, 5),
+            onChanged: (v) async {
+              if (v == slot.ls) return;
+              await ref
+                  .read(slotsControllerProvider)
+                  .updateSlot(slot.copyWith(ls: v));
+            },
           ),
         ],
       ),
