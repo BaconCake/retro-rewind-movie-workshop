@@ -9,92 +9,81 @@ import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
 
-/// Read-only grid of the custom slots configured for [genre].  Shows what
-/// would land in the next `Ship to Store` build, sourced from
-/// `custom_slots.json` (slot list + metadata) and `replacements.json`
-/// (per-slot user image).
+/// Shelf of custom slot cards for the active tab (left column of the
+/// 3-column main layout — mirrors Python's "shelf" panel
+/// RR_VHS_Tool.py:7434-7563).
 ///
-/// Slice 4a scope: display only.  Click-to-upload, offset/zoom, slot
-/// add/remove come in 4b/4c.
+/// The active tab lives in [selectedTabProvider]. Cards are clickable and
+/// drive [selectedSlotBkgProvider] (cyan border = currently selected slot,
+/// pink border = has user image, neutral border = empty placeholder).
 class TextureGrid extends ConsumerWidget {
-  final GenreInfo genre;
-
-  const TextureGrid({super.key, required this.genre});
+  const TextureGrid({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final tab = ref.watch(selectedTabProvider);
     final customSlots = ref.watch(customSlotsProvider);
     final replacements = ref.watch(replacementsProvider);
 
-    return Padding(
-      padding: const EdgeInsets.all(kSp3),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            genre.name.toUpperCase(),
-            style: const TextStyle(
-              fontSize: kFsApp,
-              fontWeight: FontWeight.w700,
-              color: kColorCyan,
-              letterSpacing: 1.5,
-            ),
-          ),
-          const SizedBox(height: kSp1),
-          Text(
-            'Slots in this genre that will be written to the mod pak.',
-            style: const TextStyle(fontSize: kFsMeta, color: kColorText3),
-          ),
-          const SizedBox(height: kSp3),
-          Expanded(
-            child: customSlots.when(
-              loading: () =>
-                  const Center(child: CircularProgressIndicator()),
-              error: (e, st) => _ErrorBanner(message: '$e'),
-              data: (slotsByDt) => replacements.when(
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
-                error: (e, st) => _ErrorBanner(message: '$e'),
-                data: (replMap) => _SlotGrid(
-                  slots: slotsByDt[genre.dataTableName] ?? const [],
-                  replacements: replMap,
-                ),
-              ),
-            ),
-          ),
-        ],
+    if (tab == 'New Releases') {
+      return const _CenteredHint(
+        title: 'NEW RELEASES',
+        body: 'Coming in slice 5 — NR support is deferred for now.',
+      );
+    }
+
+    return customSlots.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, st) => _ErrorBanner(message: '$e'),
+      data: (slotsByDt) => replacements.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, st) => _ErrorBanner(message: '$e'),
+        data: (replMap) => _SlotGrid(
+          slots: _slotsForTab(tab, slotsByDt),
+          replacements: replMap,
+        ),
       ),
     );
   }
+
+  /// "All Movies" → flatten every dataTable's slots in genre order.
+  /// Genre tab → look up by `dataTableName` (note Kids → "Kid").
+  List<SlotData> _slotsForTab(
+    String tab,
+    Map<String, List<SlotData>> slotsByDt,
+  ) {
+    if (tab == 'All Movies') {
+      return [
+        for (final g in kGenres) ...?slotsByDt[g.dataTableName],
+      ];
+    }
+    final genre = kGenres.firstWhere(
+      (g) => g.name == tab,
+      orElse: () => kGenres.first,
+    );
+    return slotsByDt[genre.dataTableName] ?? const [];
+  }
 }
 
-class _SlotGrid extends StatelessWidget {
+class _SlotGrid extends ConsumerWidget {
   final List<SlotData> slots;
   final Map<String, TextureReplacement> replacements;
 
   const _SlotGrid({required this.slots, required this.replacements});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (slots.isEmpty) {
-      return Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 360),
-          child: const Text(
-            'NO CUSTOM SLOTS\n\n'
-            'The mod pak leaves the base game’s movies untouched here.',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: kFsBody,
-              color: kColorText3,
-              height: 1.4,
-            ),
-          ),
-        ),
+      return const _CenteredHint(
+        title: 'NO CUSTOM SLOTS',
+        body: 'The mod pak leaves the base game’s movies untouched here.',
       );
     }
 
+    final selectedBkg = ref.watch(selectedSlotBkgProvider);
+
     return GridView.builder(
+      padding: const EdgeInsets.all(kSp3),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 180,
         childAspectRatio: 0.55,
@@ -107,6 +96,9 @@ class _SlotGrid extends StatelessWidget {
         return _SlotCard(
           slot: slot,
           replacement: replacements[slot.bkgTex],
+          selected: slot.bkgTex == selectedBkg,
+          onTap: () =>
+              ref.read(selectedSlotBkgProvider.notifier).state = slot.bkgTex,
         );
       },
     );
@@ -116,70 +108,87 @@ class _SlotGrid extends StatelessWidget {
 class _SlotCard extends StatelessWidget {
   final SlotData slot;
   final TextureReplacement? replacement;
+  final bool selected;
+  final VoidCallback onTap;
 
-  const _SlotCard({required this.slot, this.replacement});
+  const _SlotCard({
+    required this.slot,
+    required this.selected,
+    required this.onTap,
+    this.replacement,
+  });
 
   @override
   Widget build(BuildContext context) {
     final hasImage = replacement != null;
-    // Outer border: pink accent if a custom image is wired up (matches
-    // Python's "list row custom" rule), neutral border otherwise.
-    final borderColor = hasImage ? kColorPink : kColorBorder;
-    return Container(
-      decoration: BoxDecoration(
-        color: kColorPanel,
-        border: Border.all(color: borderColor),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: AspectRatio(
-              aspectRatio: 1024 / 2048,
-              child: _Thumbnail(replacement: replacement),
-            ),
+    // Selection trumps customization: cyan when selected, pink when there's
+    // a user image, neutral border for plain placeholders.
+    final borderColor = selected
+        ? kColorCyan
+        : hasImage
+            ? kColorPink
+            : kColorBorder;
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        decoration: BoxDecoration(
+          color: kColorPanel,
+          border: Border.all(
+            color: borderColor,
+            width: selected ? 2 : 1,
           ),
-          Container(
-            padding: const EdgeInsets.fromLTRB(kSp2, kSp1, kSp2, kSp2),
-            decoration: const BoxDecoration(
-              color: kColorPanel,
-              border: Border(top: BorderSide(color: kColorBorder)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: AspectRatio(
+                aspectRatio: 1024 / 2048,
+                child: _Thumbnail(replacement: replacement),
+              ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  slot.pnName.isEmpty ? '(untitled)' : slot.pnName,
-                  style: const TextStyle(
-                    fontSize: kFsMeta,
-                    fontWeight: FontWeight.w700,
-                    color: kColorText,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  slot.bkgTex,
-                  style: const TextStyle(
-                    fontSize: kFsMeta,
-                    color: kColorText3,
-                  ),
-                ),
-                if (slot.sku != 0)
+            Container(
+              padding: const EdgeInsets.fromLTRB(kSp2, kSp1, kSp2, kSp2),
+              decoration: const BoxDecoration(
+                color: kColorPanel,
+                border: Border(top: BorderSide(color: kColorBorder)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Text(
-                    'SKU ${slot.sku}',
+                    slot.pnName.isEmpty ? '(untitled)' : slot.pnName,
+                    style: const TextStyle(
+                      fontSize: kFsMeta,
+                      fontWeight: FontWeight.w700,
+                      color: kColorText,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    slot.bkgTex,
                     style: const TextStyle(
                       fontSize: kFsMeta,
                       color: kColorText3,
                     ),
                   ),
-              ],
+                  if (slot.sku != 0)
+                    Text(
+                      'SKU ${slot.sku}',
+                      style: const TextStyle(
+                        fontSize: kFsMeta,
+                        color: kColorText3,
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -194,7 +203,7 @@ class _Thumbnail extends StatelessWidget {
   Widget build(BuildContext context) {
     final r = replacement;
     if (r == null) {
-      return _Placeholder(
+      return const _Placeholder(
         label: 'NO IMAGE',
         sublabel: 'will render black in-game',
       );
@@ -207,8 +216,6 @@ class _Thumbnail extends StatelessWidget {
         isError: true,
       );
     }
-    // cacheWidth keeps decoded bitmap small; full-res posters can be 4-10 MB
-    // each and we may show 20+ at once.
     return Image.file(
       file,
       fit: BoxFit.cover,
@@ -270,6 +277,49 @@ class _Placeholder extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _CenteredHint extends StatelessWidget {
+  final String title;
+  final String body;
+
+  const _CenteredHint({required this.title, required this.body});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Padding(
+          padding: const EdgeInsets.all(kSp4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: kFsBody,
+                  fontWeight: FontWeight.w700,
+                  color: kColorText3,
+                  letterSpacing: 1.5,
+                ),
+              ),
+              const SizedBox(height: kSp2),
+              Text(
+                body,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: kFsMeta,
+                  color: kColorText3,
+                  height: 1.4,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -1,25 +1,32 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
 import '../providers/providers.dart';
-import '../widgets/build_panel.dart';
-import '../widgets/genre_sidebar.dart';
+import '../widgets/genre_tab_bar.dart';
+import '../widgets/slot_options_panel.dart';
+import '../widgets/slot_preview.dart';
 import '../widgets/texture_grid.dart';
 
-class HomePage extends ConsumerStatefulWidget {
+/// Top-level layout, mirroring RR_VHS_Tool.py's main window
+/// (RR_VHS_Tool.py:7274-7570):
+///
+///   ┌──────────────────────────────────────────────┐
+///   │ wordmark + actions                  (AppBar) │
+///   ├──────────────────────────────────────────────┤
+///   │ [All Movies] [Action] [Adult] … [New Releases]
+///   ├────────────┬────────────────┬───────────────┤
+///   │ shelf grid │ slot preview   │ options +     │
+///   │ (cards)    │ (full cover)   │ build button  │
+///   └────────────┴────────────────┴───────────────┘
+///
+/// The `shelf` width is fixed (≈ 4 cards wide) so the preview always has
+/// breathing room. Options are pinned to a 360px right rail.
+class HomePage extends ConsumerWidget {
   const HomePage({super.key});
 
   @override
-  ConsumerState<HomePage> createState() => _HomePageState();
-}
-
-class _HomePageState extends ConsumerState<HomePage> {
-  GenreInfo _selected = kGenres.first;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
       appBar: AppBar(
         title: const _Wordmark(),
@@ -35,16 +42,20 @@ class _HomePageState extends ConsumerState<HomePage> {
           const SizedBox(width: kSp2),
         ],
       ),
-      body: Row(
-        children: [
-          GenreSidebar(
-            selected: _selected,
-            onSelect: (g) => setState(() => _selected = g),
+      body: Column(
+        children: const [
+          GenreTabBar(),
+          Expanded(
+            child: Row(
+              children: [
+                SizedBox(width: 420, child: TextureGrid()),
+                VerticalDivider(width: 1),
+                Expanded(child: SlotPreview()),
+                VerticalDivider(width: 1),
+                SlotOptionsPanel(),
+              ],
+            ),
           ),
-          const VerticalDivider(width: 1),
-          Expanded(child: TextureGrid(genre: _selected)),
-          const VerticalDivider(width: 1),
-          const BuildPanel(),
         ],
       ),
     );

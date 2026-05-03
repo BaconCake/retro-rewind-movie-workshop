@@ -1,0 +1,296 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../core/theme/app_theme.dart';
+import '../../data/datatable/slot_data.dart';
+import '../providers/providers.dart';
+
+/// Right-hand operations column.
+///
+/// Mirrors Python's right-side options panel (RR_VHS_Tool.py:7702-7950).
+/// Top section: per-slot options when a slot is selected (read-only for
+/// slice 4a — slice 4b will turn these into editable controls).
+/// Bottom section: SHIP TO STORE button + build log + error banner.
+///
+/// The build button stays anchored at the bottom for now, matching Python's
+/// "primary action lives at the bottom of the right rail" rule. We can
+/// promote it to a top-bar action in a later slice.
+class SlotOptionsPanel extends ConsumerWidget {
+  const SlotOptionsPanel({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Container(
+      width: 360,
+      color: kColorPanel,
+      padding: const EdgeInsets.all(kSp3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: const [
+          _SectionHeader('SLOT OPTIONS'),
+          SizedBox(height: kSp2),
+          Expanded(child: _SlotOptionsBody()),
+          SizedBox(height: kSp3),
+          _BuildSection(),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String label;
+  const _SectionHeader(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        fontSize: kFsMeta,
+        fontWeight: FontWeight.w700,
+        color: kColorCyan,
+        letterSpacing: 1.5,
+      ),
+    );
+  }
+}
+
+class _SlotOptionsBody extends ConsumerWidget {
+  const _SlotOptionsBody();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final selectedBkg = ref.watch(selectedSlotBkgProvider);
+    if (selectedBkg == null) {
+      return const _EmptyOptions();
+    }
+
+    final slots = ref.watch(customSlotsProvider).maybeWhen(
+          data: (m) => m,
+          orElse: () => const <String, List<SlotData>>{},
+        );
+    final replacements = ref.watch(replacementsProvider).maybeWhen(
+          data: (m) => m,
+          orElse: () => const {},
+        );
+
+    final slot = _findSlot(slots, selectedBkg);
+    if (slot == null) {
+      return const _EmptyOptions();
+    }
+    final repl = replacements[slot.bkgTex];
+
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _OptionRow(label: 'Title', value: slot.pnName),
+          _OptionRow(label: 'Texture', value: slot.bkgTex),
+          if (slot.subTex != null)
+            _OptionRow(label: 'Subject', value: slot.subTex!),
+          _OptionRow(
+            label: 'Lock state',
+            value: slot.ls == 0 ? 'random (1–5)' : '${slot.ls}',
+          ),
+          _OptionRow(label: 'Lock cost', value: '${slot.lsc}'),
+          _OptionRow(label: 'SKU', value: '${slot.sku}'),
+          _OptionRow(
+            label: 'No-text-update',
+            value: slot.ntu ? 'yes' : 'no',
+          ),
+          const SizedBox(height: kSp3),
+          const _SectionHeader('USER IMAGE'),
+          const SizedBox(height: kSp2),
+          if (repl == null)
+            const Text(
+              '(no image — slot will render black in-game)',
+              style: TextStyle(fontSize: kFsMeta, color: kColorText3),
+            )
+          else
+            Text(
+              repl.path,
+              style: const TextStyle(fontSize: kFsMeta, color: kColorText2),
+            ),
+        ],
+      ),
+    );
+  }
+
+  SlotData? _findSlot(Map<String, List<SlotData>> byDt, String bkgTex) {
+    for (final list in byDt.values) {
+      for (final s in list) {
+        if (s.bkgTex == bkgTex) return s;
+      }
+    }
+    return null;
+  }
+}
+
+class _OptionRow extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _OptionRow({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: kSp2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: const TextStyle(
+              fontSize: kFsMeta,
+              color: kColorText3,
+              letterSpacing: 1,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value.isEmpty ? '—' : value,
+            style: const TextStyle(fontSize: kFsBody, color: kColorText),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyOptions extends StatelessWidget {
+  const _EmptyOptions();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: kSp3),
+      child: Text(
+        '(select a slot to see its options)',
+        style: TextStyle(fontSize: kFsMeta, color: kColorText3),
+      ),
+    );
+  }
+}
+
+class _BuildSection extends ConsumerWidget {
+  const _BuildSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(buildControllerProvider);
+    final controller = ref.read(buildControllerProvider.notifier);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        FilledButton.icon(
+          onPressed: state.isRunning ? null : controller.ship,
+          icon: state.isRunning
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.local_shipping_outlined, size: 18),
+          label: Text(
+            state.isRunning ? 'BUILDING...' : 'SHIP TO STORE',
+            style: const TextStyle(letterSpacing: 1.5),
+          ),
+        ),
+        const SizedBox(height: kSp3),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'BUILD LOG',
+                style: TextStyle(
+                  fontSize: kFsMeta,
+                  fontWeight: FontWeight.w700,
+                  color: kColorCyan,
+                  letterSpacing: 1.5,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Copy log to clipboard',
+              visualDensity: VisualDensity.compact,
+              color: kColorText2,
+              icon: const Icon(Icons.content_copy, size: 14),
+              onPressed: state.log.isEmpty
+                  ? null
+                  : () async {
+                      await Clipboard.setData(
+                          ClipboardData(text: state.log.join('\n')));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Log copied to clipboard'),
+                            duration: Duration(seconds: 1),
+                          ),
+                        );
+                      }
+                    },
+            ),
+          ],
+        ),
+        const SizedBox(height: kSp1),
+        SizedBox(
+          height: 180,
+          child: Container(
+            decoration: BoxDecoration(
+              color: kColorBg,
+              border: Border.all(color: kColorBorder),
+            ),
+            padding: const EdgeInsets.all(kSp2),
+            child: ListView.builder(
+              itemCount: state.log.length,
+              itemBuilder: (context, i) {
+                final line = state.log[i];
+                return Text(
+                  line,
+                  style: TextStyle(
+                    fontSize: kFsMeta,
+                    color: _logLineColor(line),
+                    height: 1.3,
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+        if (state.lastErrorCode != null) ...[
+          const SizedBox(height: kSp2),
+          Container(
+            padding: const EdgeInsets.all(kSp2),
+            decoration: BoxDecoration(
+              color: kColorPanel,
+              border: Border.all(color: kColorPink),
+            ),
+            child: Text(
+              '[${state.lastErrorCode}] ${state.lastErrorMessage}',
+              style: const TextStyle(color: kColorPink, fontSize: kFsMeta),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Color _logLineColor(String line) {
+    final l = line.toUpperCase();
+    if (l.contains('FAIL') || l.contains('ERROR') || l.contains('[E0')) {
+      return kColorPink;
+    }
+    if (l.contains(' OK') ||
+        l.contains('INJECT ') ||
+        l.contains('PLACEHOLDER ') ||
+        l.contains('SUCCEEDED') ||
+        l.contains('INSTALLED')) {
+      return kColorCyan;
+    }
+    return kColorText2;
+  }
+}

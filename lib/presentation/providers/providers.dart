@@ -76,6 +76,22 @@ final replacementsProvider =
   return ReplacementsDataSource(dir).load();
 });
 
+/// Identifier of the currently selected genre tab.
+///
+///   * `"All Movies"`   — show every custom slot across all genres.
+///   * `"<Genre>"`      — filter to that genre's `dataTableName`
+///                        (note: visible name "Kids" → dt "Kid").
+///   * `"New Releases"` — reserved for slice 5 (NR support is deferred).
+///
+/// Default is "All Movies", matching the Python tool's startup tab
+/// (RR_VHS_Tool.py:7323).
+final selectedTabProvider = StateProvider<String>((_) => 'All Movies');
+
+/// Currently selected slot, identified by its globally-unique `bkgTex`
+/// (e.g. `"T_Bkg_Dra_001"`).  Null when no slot is picked.  Drives the
+/// preview + slot-options panels.
+final selectedSlotBkgProvider = StateProvider<String?>((_) => null);
+
 class BuildState {
   final bool isRunning;
   final List<String> log;
