@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
+import '../../domain/sku.dart';
 import '../providers/providers.dart';
 
 /// Right-hand operations column.
@@ -83,29 +85,13 @@ class _SlotOptionsBody extends ConsumerWidget {
     }
     final repl = replacements[slot.bkgTex];
 
+    // Re-key the form on the slot identity so child TextField controllers
+    // reset when the user picks a different slot (otherwise they'd hold
+    // the previous slot's value).
     return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _OptionRow(label: 'Title', value: slot.pnName),
-          _OptionRow(label: 'Texture', value: slot.bkgTex),
-          if (slot.subTex != null)
-            _OptionRow(label: 'Subject', value: slot.subTex!),
-          _OptionRow(
-            label: 'Lock state',
-            value: slot.ls == 0 ? 'random (1–5)' : '${slot.ls}',
-          ),
-          _OptionRow(label: 'Lock cost', value: '${slot.lsc}'),
-          _OptionRow(label: 'SKU', value: '${slot.sku}'),
-          _OptionRow(
-            label: 'No-text-update',
-            value: slot.ntu ? 'yes' : 'no',
-          ),
-          const SizedBox(height: kSp3),
-          const _SectionHeader('USER IMAGE'),
-          const SizedBox(height: kSp2),
-          _UserImageControls(bkgTex: slot.bkgTex, currentPath: repl?.path),
-        ],
+      child: KeyedSubtree(
+        key: ValueKey('slot-form-${slot.bkgTex}'),
+        child: _SlotForm(slot: slot, allSlots: slots, repl: repl),
       ),
     );
   }
@@ -117,6 +103,159 @@ class _SlotOptionsBody extends ConsumerWidget {
       }
     }
     return null;
+  }
+}
+
+/// Editable per-slot form. Lives below the section header. Layout matches
+/// Python's slot-edit dialog (RR_VHS_Tool.py:12935-13000):
+///   * Title          — editable text
+///   * Texture        — read-only (slot identity)
+///   * Subject        — read-only (auto-generated)
+///   * Layout Style   — dropdown 1..5
+///   * Layout Color   — dropdown 1..10
+///   * Star Rating    — dropdown (kStarOptions); changing it regenerates SKU
+///   * Rarity         — dropdown (Rarity.all);   changing it regenerates SKU
+///   * SKU            — read-only preview (number + skuDisplay summary)
+class _SlotForm extends ConsumerWidget {
+  final SlotData slot;
+  final Map<String, List<SlotData>> allSlots;
+  final dynamic repl; // TextureReplacement?, kept loose to avoid import noise
+
+  const _SlotForm({
+    required this.slot,
+    required this.allSlots,
+    required this.repl,
+  });
+
+  /// 3-digit slot index from `T_Bkg_<code>_<num>` — what generateSku wants.
+  /// Falls back to 1 if the name doesn't end in digits (shouldn't happen
+  /// for any well-formed slot, but defensive against hand-edited JSON).
+  int _slotIndexOf(String bkgTex) {
+    final m = RegExp(r'_(\d+)$').firstMatch(bkgTex);
+    return m == null ? 1 : int.parse(m.group(1)!);
+  }
+
+  /// SKUs already in use across every genre, with the current slot's SKU
+  /// excluded — so generateSku won't refuse to keep the current value when
+  /// the user re-picks the same star/rarity.
+  Set<int> _usedSkusExcludingSelf() {
+    final s = <int>{};
+    for (final list in allSlots.values) {
+      for (final entry in list) {
+        if (entry.bkgTex != slot.bkgTex && entry.sku != 0) s.add(entry.sku);
+      }
+    }
+    return s;
+  }
+
+  /// Pick the StarOption whose last2 is closest to the slot's current SKU.
+  /// Mirrors Python's `min(star_labels, key=lambda l: abs(...))`
+  /// (RR_VHS_Tool.py:12901-12902).
+  StarOption _currentStar() {
+    final last2 = slot.sku % 100;
+    return kStarOptions.reduce(
+      (a, b) =>
+          (a.last2 - last2).abs() <= (b.last2 - last2).abs() ? a : b,
+    );
+  }
+
+  Future<void> _commitTitle(WidgetRef ref, String v) async {
+    if (v == slot.pnName) return;
+    await ref.read(slotsControllerProvider).updateSlot(
+          slot.copyWith(pnName: v),
+        );
+  }
+
+  Future<void> _commitLs(WidgetRef ref, int v) async {
+    if (v == slot.ls) return;
+    await ref.read(slotsControllerProvider).updateSlot(
+          slot.copyWith(ls: v),
+        );
+  }
+
+  Future<void> _commitLsc(WidgetRef ref, int v) async {
+    if (v == slot.lsc) return;
+    await ref.read(slotsControllerProvider).updateSlot(
+          slot.copyWith(lsc: v),
+        );
+  }
+
+  Future<void> _regenerateSku(
+    WidgetRef ref, {
+    required int last2,
+    required Rarity rarity,
+  }) async {
+    final genre = parseGenreFromTextureName(slot.bkgTex);
+    final newSku = generateSku(
+      genre: genre?.dataTableName ?? 'Drama',
+      slotIndex: _slotIndexOf(slot.bkgTex),
+      last2: last2,
+      rarity: rarity,
+      usedSkus: _usedSkusExcludingSelf(),
+    );
+    if (newSku == slot.sku) return;
+    await ref.read(slotsControllerProvider).updateSlot(
+          slot.copyWith(sku: newSku),
+        );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final currentStar = _currentStar();
+    final currentRarity = skuToRarity(slot.sku);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SlotTextField(
+          label: 'Title',
+          initialValue: slot.pnName,
+          onCommit: (v) => _commitTitle(ref, v),
+        ),
+        _OptionRow(label: 'Texture', value: slot.bkgTex),
+        if (slot.subTex != null)
+          _OptionRow(label: 'Subject', value: slot.subTex!),
+        _SlotIntDropdown(
+          label: 'Layout style',
+          value: slot.ls.clamp(1, 5),
+          options: const [1, 2, 3, 4, 5],
+          onChanged: (v) => _commitLs(ref, v),
+        ),
+        _SlotIntDropdown(
+          label: 'Layout color',
+          value: slot.lsc.clamp(1, 10),
+          options: const [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+          onChanged: (v) => _commitLsc(ref, v),
+        ),
+        _SlotChoiceDropdown<StarOption>(
+          label: 'Star rating',
+          value: currentStar,
+          options: kStarOptions,
+          labelOf: (o) => o.label,
+          onChanged: (s) =>
+              _regenerateSku(ref, last2: s.last2, rarity: currentRarity),
+        ),
+        _SlotChoiceDropdown<Rarity>(
+          label: 'Rarity',
+          value: currentRarity,
+          options: Rarity.all,
+          labelOf: (r) => r.label,
+          onChanged: (r) =>
+              _regenerateSku(ref, last2: currentStar.last2, rarity: r),
+        ),
+        _OptionRow(
+          label: 'SKU',
+          value: '${slot.sku}    ${skuDisplay(slot.sku)}',
+        ),
+        const SizedBox(height: kSp3),
+        const _SectionHeader('USER IMAGE'),
+        const SizedBox(height: kSp2),
+        _UserImageControls(
+          bkgTex: slot.bkgTex,
+          currentPath: repl?.path as String?,
+        ),
+      ],
+    );
   }
 }
 
@@ -146,6 +285,173 @@ class _OptionRow extends StatelessWidget {
             value.isEmpty ? '—' : value,
             style: const TextStyle(fontSize: kFsBody, color: kColorText),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Editable string field. Commits on Enter and on focus loss; skips the
+/// commit when the value is unchanged so we don't churn the file on every
+/// focus shuffle.
+class _SlotTextField extends StatefulWidget {
+  final String label;
+  final String initialValue;
+  final ValueChanged<String> onCommit;
+
+  const _SlotTextField({
+    required this.label,
+    required this.initialValue,
+    required this.onCommit,
+  });
+
+  @override
+  State<_SlotTextField> createState() => _SlotTextFieldState();
+}
+
+class _SlotTextFieldState extends State<_SlotTextField> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.initialValue);
+  late String _lastCommitted = widget.initialValue;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _commit() {
+    final next = _ctrl.text;
+    if (next == _lastCommitted) return;
+    _lastCommitted = next;
+    widget.onCommit(next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _FieldShell(
+      label: widget.label,
+      child: TextField(
+        controller: _ctrl,
+        decoration: const InputDecoration(isDense: true),
+        style: const TextStyle(fontSize: kFsBody, color: kColorText),
+        onSubmitted: (_) => _commit(),
+        onTapOutside: (_) => _commit(),
+      ),
+    );
+  }
+}
+
+/// Small-range integer dropdown — used for Layout Style (1–5) and
+/// Layout Color (1–10), matching Python's Spinbox controls.
+class _SlotIntDropdown extends StatelessWidget {
+  final String label;
+  final int value;
+  final List<int> options;
+  final ValueChanged<int> onChanged;
+
+  const _SlotIntDropdown({
+    required this.label,
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _FieldShell(
+      label: label,
+      child: DropdownButtonFormField<int>(
+        initialValue: value,
+        isDense: true,
+        decoration: const InputDecoration(isDense: true),
+        style: const TextStyle(fontSize: kFsBody, color: kColorText),
+        dropdownColor: kColorPanel,
+        items: [
+          for (final v in options)
+            DropdownMenuItem(value: v, child: Text('$v')),
+        ],
+        onChanged: (v) {
+          if (v != null) onChanged(v);
+        },
+      ),
+    );
+  }
+}
+
+/// Generic dropdown of arbitrary objects — used for Star Rating
+/// (StarOption) and Rarity (Rarity). Equality on `T` decides which item
+/// is "selected", so callers should pass canonical instances (e.g. the
+/// `kStarOptions` constants, not freshly built copies).
+class _SlotChoiceDropdown<T> extends StatelessWidget {
+  final String label;
+  final T value;
+  final List<T> options;
+  final String Function(T) labelOf;
+  final ValueChanged<T> onChanged;
+
+  const _SlotChoiceDropdown({
+    required this.label,
+    required this.value,
+    required this.options,
+    required this.labelOf,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _FieldShell(
+      label: label,
+      child: DropdownButtonFormField<T>(
+        initialValue: value,
+        isDense: true,
+        isExpanded: true,
+        decoration: const InputDecoration(isDense: true),
+        style: const TextStyle(fontSize: kFsBody, color: kColorText),
+        dropdownColor: kColorPanel,
+        items: [
+          for (final o in options)
+            DropdownMenuItem(
+              value: o,
+              child: Text(
+                labelOf(o),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
+        onChanged: (v) {
+          if (v != null) onChanged(v);
+        },
+      ),
+    );
+  }
+}
+
+/// Caps-label above, child input below — keeps the editable rows visually
+/// flush with the read-only [_OptionRow]s above them.
+class _FieldShell extends StatelessWidget {
+  final String label;
+  final Widget child;
+
+  const _FieldShell({required this.label, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: kSp2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: const TextStyle(
+              fontSize: kFsMeta,
+              color: kColorText3,
+              letterSpacing: 1,
+            ),
+          ),
+          const SizedBox(height: 2),
+          child,
         ],
       ),
     );

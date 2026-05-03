@@ -55,4 +55,19 @@ class SlotData {
       subTex: subTex ?? this.subTex,
     );
   }
+
+  /// JSON shape consumed by `custom_slots.json` — same key set the Python
+  /// tool reads/writes (RR_VHS_Tool.py:556-580).  `sub_tex` is omitted when
+  /// null so we don't pollute hand-edited files with explicit `null`s.
+  Map<String, Object> toJson() {
+    return {
+      'bkg_tex': bkgTex,
+      'sub_tex': ?subTex,
+      'pn_name': pnName,
+      'ls': ls,
+      'lsc': lsc,
+      'sku': sku,
+      'ntu': ntu,
+    };
+  }
 }

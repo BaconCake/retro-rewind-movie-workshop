@@ -69,6 +69,20 @@ class CustomSlotsDataSource {
     return out;
   }
 
+  /// Persist the in-memory `slotsByDt` map back to `custom_slots.json`.
+  /// Pretty-printed with 2-space indent, matching the Python writer's
+  /// `json.dumps(..., indent=2)` so diffs stay readable when both tools
+  /// touch the same file.
+  Future<void> save(Map<String, List<SlotData>> slotsByDt) async {
+    final encoded = const JsonEncoder.withIndent('  ').convert(
+      {
+        for (final e in slotsByDt.entries)
+          e.key: [for (final s in e.value) s.toJson()],
+      },
+    );
+    await File(filePath).writeAsString(encoded);
+  }
+
   static SlotData? _slotFromJson(Map<dynamic, dynamic> m) {
     final bkgTex = m['bkg_tex'];
     final pnName = m['pn_name'];

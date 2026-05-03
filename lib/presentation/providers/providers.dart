@@ -115,6 +115,44 @@ final replacementsControllerProvider = Provider<ReplacementsController>(
   (ref) => ReplacementsController(ref),
 );
 
+/// Mutator for `custom_slots.json`.  Same shape as [ReplacementsController]:
+/// load → mutate → save → invalidate.  Edits are scoped per-slot via
+/// [updateSlot] (find by globally-unique `bkgTex` and replace in place,
+/// preserving genre order).
+class SlotsController {
+  final Ref _ref;
+  SlotsController(this._ref);
+
+  Future<void> updateSlot(SlotData updated) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = CustomSlotsDataSource(dir);
+    final current = await ds.load();
+
+    final next = <String, List<SlotData>>{};
+    var found = false;
+    for (final entry in current.entries) {
+      next[entry.key] = [
+        for (final s in entry.value)
+          if (s.bkgTex == updated.bkgTex)
+            (() {
+              found = true;
+              return updated;
+            })()
+          else
+            s,
+      ];
+    }
+    if (!found) return; // unknown slot; nothing to write back
+
+    await ds.save(next);
+    _ref.invalidate(customSlotsProvider);
+  }
+}
+
+final slotsControllerProvider = Provider<SlotsController>(
+  (ref) => SlotsController(ref),
+);
+
 /// Identifier of the currently selected genre tab.
 ///
 ///   * `"All Movies"`   — show every custom slot across all genres.
