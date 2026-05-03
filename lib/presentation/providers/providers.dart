@@ -76,6 +76,45 @@ final replacementsProvider =
   return ReplacementsDataSource(dir).load();
 });
 
+/// Mutator for `replacements.json`.  Reads the current state, applies a
+/// single change, writes the file back, then invalidates [replacementsProvider]
+/// so the UI rebuilds from disk (matching the Python tool's "always reread
+/// after save" pattern — RR_VHS_Tool.py:5717-5720).
+class ReplacementsController {
+  final Ref _ref;
+  ReplacementsController(this._ref);
+
+  Future<void> setImage(String bkgTex, String imagePath) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = ReplacementsDataSource(dir);
+    final current = await ds.load();
+    final next = Map<String, TextureReplacement>.from(current);
+    final existing = next[bkgTex];
+    next[bkgTex] = TextureReplacement(
+      path: imagePath,
+      offsetX: existing?.offsetX ?? 0,
+      offsetY: existing?.offsetY ?? 0,
+      zoom: existing?.zoom ?? 1.0,
+    );
+    await ds.save(next);
+    _ref.invalidate(replacementsProvider);
+  }
+
+  Future<void> removeImage(String bkgTex) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = ReplacementsDataSource(dir);
+    final current = await ds.load();
+    if (!current.containsKey(bkgTex)) return;
+    final next = Map<String, TextureReplacement>.from(current)..remove(bkgTex);
+    await ds.save(next);
+    _ref.invalidate(replacementsProvider);
+  }
+}
+
+final replacementsControllerProvider = Provider<ReplacementsController>(
+  (ref) => ReplacementsController(ref),
+);
+
 /// Identifier of the currently selected genre tab.
 ///
 ///   * `"All Movies"`   — show every custom slot across all genres.

@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -103,16 +104,7 @@ class _SlotOptionsBody extends ConsumerWidget {
           const SizedBox(height: kSp3),
           const _SectionHeader('USER IMAGE'),
           const SizedBox(height: kSp2),
-          if (repl == null)
-            const Text(
-              '(no image — slot will render black in-game)',
-              style: TextStyle(fontSize: kFsMeta, color: kColorText3),
-            )
-          else
-            Text(
-              repl.path,
-              style: const TextStyle(fontSize: kFsMeta, color: kColorText2),
-            ),
+          _UserImageControls(bkgTex: slot.bkgTex, currentPath: repl?.path),
         ],
       ),
     );
@@ -171,6 +163,119 @@ class _EmptyOptions extends StatelessWidget {
         '(select a slot to see its options)',
         style: TextStyle(fontSize: kFsMeta, color: kColorText3),
       ),
+    );
+  }
+}
+
+/// Upload / replace / remove controls for the per-slot user image.
+///
+/// "Upload" / "Replace" opens an OS file picker constrained to common
+/// raster formats; the chosen path is written to `replacements.json` via
+/// [ReplacementsController.setImage]. "Remove" deletes the entry — the
+/// slot will then render as a black placeholder in-game.
+class _UserImageControls extends ConsumerStatefulWidget {
+  final String bkgTex;
+  final String? currentPath;
+
+  const _UserImageControls({required this.bkgTex, this.currentPath});
+
+  @override
+  ConsumerState<_UserImageControls> createState() =>
+      _UserImageControlsState();
+}
+
+class _UserImageControlsState extends ConsumerState<_UserImageControls> {
+  bool _busy = false;
+
+  Future<void> _pick() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+        dialogTitle: 'Pick cover image for ${widget.bkgTex}',
+      );
+      if (result == null || result.files.isEmpty) return;
+      final path = result.files.single.path;
+      if (path == null) return;
+      await ref
+          .read(replacementsControllerProvider)
+          .setImage(widget.bkgTex, path);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _remove() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await ref
+          .read(replacementsControllerProvider)
+          .removeImage(widget.bkgTex);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasImage = widget.currentPath != null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (hasImage)
+          Padding(
+            padding: const EdgeInsets.only(bottom: kSp2),
+            child: Text(
+              widget.currentPath!,
+              style: const TextStyle(fontSize: kFsMeta, color: kColorText2),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          )
+        else
+          const Padding(
+            padding: EdgeInsets.only(bottom: kSp2),
+            child: Text(
+              '(no image — slot will render black in-game)',
+              style: TextStyle(fontSize: kFsMeta, color: kColorText3),
+            ),
+          ),
+        Row(
+          children: [
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _pick,
+              icon: Icon(
+                hasImage ? Icons.swap_horiz : Icons.upload_file_outlined,
+                size: 16,
+              ),
+              label: Text(hasImage ? 'REPLACE' : 'UPLOAD'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: kColorPink,
+                side: const BorderSide(color: kColorPink),
+                shape: const RoundedRectangleBorder(),
+                visualDensity: VisualDensity.compact,
+                textStyle: const TextStyle(
+                  fontSize: kFsMeta,
+                  letterSpacing: 1.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: kSp2),
+            if (hasImage)
+              IconButton(
+                onPressed: _busy ? null : _remove,
+                tooltip: 'Remove image',
+                visualDensity: VisualDensity.compact,
+                color: kColorText2,
+                icon: const Icon(Icons.delete_outline, size: 18),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -48,13 +49,9 @@ class SlotPreview extends ConsumerWidget {
             child: Center(
               child: AspectRatio(
                 aspectRatio: 1024 / 2048,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: kColorPanel,
-                    border: Border.all(color: kColorBorder),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: _PreviewImage(path: repl?.path),
+                child: _PreviewFrame(
+                  bkgTex: slot.bkgTex,
+                  imagePath: repl?.path,
                 ),
               ),
             ),
@@ -90,6 +87,62 @@ class SlotPreview extends ConsumerWidget {
   }
 }
 
+/// Wraps the cover image in a clickable frame: clicking the frame opens
+/// a file picker and writes the chosen image to `replacements.json`.
+/// This is the same path the right-rail "UPLOAD"/"REPLACE" button uses,
+/// so users can act from either column.
+class _PreviewFrame extends ConsumerStatefulWidget {
+  final String bkgTex;
+  final String? imagePath;
+
+  const _PreviewFrame({required this.bkgTex, this.imagePath});
+
+  @override
+  ConsumerState<_PreviewFrame> createState() => _PreviewFrameState();
+}
+
+class _PreviewFrameState extends ConsumerState<_PreviewFrame> {
+  bool _busy = false;
+
+  Future<void> _pick() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+        dialogTitle: 'Pick cover image for ${widget.bkgTex}',
+      );
+      if (result == null || result.files.isEmpty) return;
+      final path = result.files.single.path;
+      if (path == null) return;
+      await ref
+          .read(replacementsControllerProvider)
+          .setImage(widget.bkgTex, path);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: _busy ? null : _pick,
+        child: Container(
+          decoration: BoxDecoration(
+            color: kColorPanel,
+            border: Border.all(color: kColorBorder),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: _PreviewImage(path: widget.imagePath),
+        ),
+      ),
+    );
+  }
+}
+
 class _PreviewImage extends StatelessWidget {
   final String? path;
 
@@ -100,8 +153,10 @@ class _PreviewImage extends StatelessWidget {
     final p = path;
     if (p == null) {
       return const _PreviewPlaceholder(
-        label: 'NO IMAGE',
-        sublabel: 'will render black in-game',
+        label: 'CLICK TO UPLOAD',
+        sublabel: 'PNG · JPG · WEBP · BMP',
+        icon: Icons.upload_file_outlined,
+        accent: kColorPink,
       );
     }
     final file = File(p);
@@ -128,16 +183,20 @@ class _PreviewPlaceholder extends StatelessWidget {
   final String label;
   final String sublabel;
   final bool isError;
+  final IconData? icon;
+  final Color? accent;
 
   const _PreviewPlaceholder({
     required this.label,
     required this.sublabel,
     this.isError = false,
+    this.icon,
+    this.accent,
   });
 
   @override
   Widget build(BuildContext context) {
-    final fg = isError ? kColorPink : kColorText3;
+    final fg = accent ?? (isError ? kColorPink : kColorText3);
     return Container(
       color: kColorBg,
       padding: const EdgeInsets.all(kSp4),
@@ -146,9 +205,10 @@ class _PreviewPlaceholder extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            isError
-                ? Icons.broken_image_outlined
-                : Icons.image_not_supported_outlined,
+            icon ??
+                (isError
+                    ? Icons.broken_image_outlined
+                    : Icons.image_not_supported_outlined),
             color: fg,
             size: 64,
           ),
