@@ -261,7 +261,91 @@ class _SlotForm extends ConsumerWidget {
           bkgTex: slot.bkgTex,
           currentPath: repl?.path as String?,
         ),
+        const SizedBox(height: kSp4),
+        _DeleteSlotLink(slot: slot),
       ],
+    );
+  }
+}
+
+/// Demoted destructive action — small red text link, matching Python's
+/// "Delete This Movie" `tk.Label` (RR_VHS_Tool.py:8879-8890). Confirms
+/// before calling [SlotsController.removeSlot].
+class _DeleteSlotLink extends ConsumerStatefulWidget {
+  final SlotData slot;
+  const _DeleteSlotLink({required this.slot});
+
+  @override
+  ConsumerState<_DeleteSlotLink> createState() => _DeleteSlotLinkState();
+}
+
+class _DeleteSlotLinkState extends ConsumerState<_DeleteSlotLink> {
+  bool _hover = false;
+
+  Future<void> _confirmAndDelete() async {
+    final title = widget.slot.pnName.isEmpty
+        ? widget.slot.bkgTex
+        : widget.slot.pnName;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: kColorPanel,
+        shape: const RoundedRectangleBorder(),
+        title: const Text('Delete movie'),
+        content: Text(
+          'Delete "$title"?\nThis cannot be undone.',
+          style: const TextStyle(color: kColorText),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('CANCEL'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: kColorPink,
+              foregroundColor: kColorTextInv,
+              shape: const RoundedRectangleBorder(),
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('DELETE'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ref
+        .read(slotsControllerProvider)
+        .removeSlot(widget.slot.bkgTex);
+    // Clear the selection so the right rail goes back to the empty state.
+    if (mounted) {
+      ref.read(selectedSlotBkgProvider.notifier).state = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: _confirmAndDelete,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          alignment: Alignment.center,
+          child: Text(
+            'Delete this movie',
+            style: TextStyle(
+              fontSize: kFsMeta,
+              color:
+                  _hover ? const Color(0xFFFF6666) : const Color(0xFF994444),
+              decoration: _hover ? TextDecoration.underline : null,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

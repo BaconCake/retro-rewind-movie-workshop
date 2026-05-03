@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
+import '../../core/constants/genres.dart';
 import '../../data/datasources/custom_slots_data_source.dart';
 import '../../data/datasources/json_file_data_source.dart';
 import '../../data/datasources/replacements_data_source.dart';
@@ -10,12 +11,14 @@ import '../../data/datatable/slot_data.dart';
 import '../../data/repositories/config_repository_impl.dart';
 import '../../data/repositories/pak_builder_impl.dart';
 import '../../data/repositories/texture_repository_impl.dart';
+import '../../domain/custom_slot_naming.dart';
 import '../../domain/entities/app_config.dart';
 import '../../domain/entities/texture.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
 import '../../domain/repositories/texture_repository.dart';
+import '../../domain/sku.dart';
 
 /// The directory the app treats as its working dir. We prefer the current
 /// working directory if it contains config.json — this is what `flutter run`
@@ -145,6 +148,111 @@ class SlotsController {
     if (!found) return; // unknown slot; nothing to write back
 
     await ds.save(next);
+    _ref.invalidate(customSlotsProvider);
+  }
+
+  /// Append a new custom slot to [genre] with the given title + star/rarity
+  /// choices. Picks the lowest unused `T_Bkg_<code>_NNN` index, generates a
+  /// unique SKU, and assigns the next sequential `T_Sub_NN` (wraps at 99 →
+  /// 78). Returns the new slot's `bkgTex`, or `null` when the genre is
+  /// unknown / hidden / already at the [kBkgMax] cap.
+  Future<String?> addSlot({
+    required GenreInfo genre,
+    required String title,
+    int last2 = 93,
+    Rarity rarity = Rarity.common,
+  }) async {
+    if (kHiddenGenres.contains(genre.name)) return null;
+
+    final dir = _ref.read(workingDirProvider);
+    final ds = CustomSlotsDataSource(dir);
+    final current = await ds.load();
+
+    final existing =
+        current[genre.dataTableName] ?? const <SlotData>[];
+    if (existing.length >= kBkgMax) return null;
+
+    final newIdx = nextFreeSlotIndex(
+      genre.code,
+      existing.map((s) => s.bkgTex),
+    );
+    final bkgTex = formatCustomBkgTex(genre.code, newIdx);
+    final subTex = customSlotSubTex(existing.length + 1);
+
+    // Build the global used-SKU set so generateSku stays unique even
+    // across genres (the prefix scan is single-band so collisions across
+    // prefixes are unlikely, but cheap to be safe).
+    final usedSkus = <int>{};
+    for (final list in current.values) {
+      for (final s in list) {
+        if (s.sku != 0) usedSkus.add(s.sku);
+      }
+    }
+
+    final sku = generateSku(
+      genre: genre.dataTableName,
+      slotIndex: newIdx,
+      last2: last2,
+      rarity: rarity,
+      usedSkus: usedSkus,
+    );
+
+    final newSlot = SlotData(
+      bkgTex: bkgTex,
+      pnName: title,
+      ls: 0,
+      lsc: 4,
+      sku: sku,
+      subTex: subTex,
+    );
+
+    final next = Map<String, List<SlotData>>.from(current);
+    next[genre.dataTableName] = [...existing, newSlot];
+
+    await ds.save(next);
+    _ref.invalidate(customSlotsProvider);
+    return bkgTex;
+  }
+
+  /// Delete a custom slot by its globally-unique [bkgTex]. Also drops any
+  /// matching entry in `replacements.json` so a stale image path doesn't
+  /// outlive the slot. No-op when the slot doesn't exist.
+  Future<void> removeSlot(String bkgTex) async {
+    final dir = _ref.read(workingDirProvider);
+    final slotsDs = CustomSlotsDataSource(dir);
+    final current = await slotsDs.load();
+
+    var found = false;
+    final next = <String, List<SlotData>>{};
+    for (final entry in current.entries) {
+      final filtered = [
+        for (final s in entry.value)
+          if (s.bkgTex == bkgTex)
+            (() {
+              found = true;
+              return null;
+            })()
+          else
+            s,
+      ].whereType<SlotData>().toList();
+      next[entry.key] = filtered;
+    }
+    if (!found) return;
+
+    await slotsDs.save(next);
+
+    // Also remove any image replacement so the next add of this same
+    // bkgTex (later, with a different movie) doesn't inherit an old
+    // cover by accident.
+    final replDs = ReplacementsDataSource(dir);
+    final replCurrent = await replDs.load();
+    if (replCurrent.containsKey(bkgTex)) {
+      final replNext = Map<String, TextureReplacement>.from(replCurrent)
+        ..remove(bkgTex);
+      await replDs.save(replNext);
+      _ref.invalidate(replacementsProvider);
+    }
+
     _ref.invalidate(customSlotsProvider);
   }
 }

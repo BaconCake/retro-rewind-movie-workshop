@@ -8,6 +8,7 @@ import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
+import 'add_slot_dialog.dart';
 
 /// Shelf of custom slot cards for the active tab (left column of the
 /// 3-column main layout — mirrors Python's "shelf" panel
@@ -71,16 +72,26 @@ class _SlotGrid extends ConsumerWidget {
 
   const _SlotGrid({required this.slots, required this.replacements});
 
+  /// Pre-fill genre for the Add dialog. Null when on "All Movies"
+  /// (the dialog falls back to its own picker).
+  GenreInfo? _activeGenre(String tab) {
+    if (tab == 'All Movies') return null;
+    for (final g in kGenres) {
+      if (g.name == tab) return g;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (slots.isEmpty) {
-      return const _CenteredHint(
-        title: 'NO CUSTOM SLOTS',
-        body: 'The mod pak leaves the base game’s movies untouched here.',
-      );
-    }
-
+    final tab = ref.watch(selectedTabProvider);
     final selectedBkg = ref.watch(selectedSlotBkgProvider);
+    final activeGenre = _activeGenre(tab);
+
+    // +1 cell for the "Add" tile (always shown unless we're on NR — that's
+    // handled by the parent which short-circuits NR before instantiating
+    // this widget).
+    final itemCount = slots.length + 1;
 
     return GridView.builder(
       padding: const EdgeInsets.all(kSp3),
@@ -90,8 +101,15 @@ class _SlotGrid extends ConsumerWidget {
         crossAxisSpacing: kSp3,
         mainAxisSpacing: kSp3,
       ),
-      itemCount: slots.length,
+      itemCount: itemCount,
       itemBuilder: (context, i) {
+        if (i == slots.length) {
+          return _AddSlotTile(
+            initialGenre: activeGenre,
+            onTap: () =>
+                AddSlotDialog.show(context, initialGenre: activeGenre),
+          );
+        }
         final slot = slots[i];
         return _SlotCard(
           slot: slot,
@@ -103,6 +121,103 @@ class _SlotGrid extends ConsumerWidget {
       },
     );
   }
+}
+
+/// "+ ADD MOVIE" tile, last cell of the shelf grid. Pink dashed border to
+/// distinguish from real slots.
+class _AddSlotTile extends StatelessWidget {
+  final GenreInfo? initialGenre;
+  final VoidCallback onTap;
+
+  const _AddSlotTile({required this.initialGenre, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: CustomPaint(
+          painter: _DashedBorderPainter(color: kColorPink),
+          child: Container(
+            color: kColorPanel,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.all(kSp3),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.add, color: kColorPink, size: 36),
+                const SizedBox(height: kSp1),
+                Text(
+                  'ADD MOVIE',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: kFsMeta,
+                    fontWeight: FontWeight.w700,
+                    color: kColorPink,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                if (initialGenre != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    'to ${initialGenre!.name}'.toUpperCase(),
+                    style: const TextStyle(
+                      fontSize: kFsMeta,
+                      color: kColorText3,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Hand-rolled dashed-rectangle border painter — Flutter has no built-in.
+class _DashedBorderPainter extends CustomPainter {
+  final Color color;
+  _DashedBorderPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const dash = 6.0;
+    const gap = 4.0;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+
+    void hLine(double y) {
+      var x = 0.0;
+      while (x < size.width) {
+        final x2 = (x + dash).clamp(0.0, size.width);
+        canvas.drawLine(Offset(x, y), Offset(x2, y), paint);
+        x += dash + gap;
+      }
+    }
+
+    void vLine(double x) {
+      var y = 0.0;
+      while (y < size.height) {
+        final y2 = (y + dash).clamp(0.0, size.height);
+        canvas.drawLine(Offset(x, y), Offset(x, y2), paint);
+        y += dash + gap;
+      }
+    }
+
+    hLine(0);
+    hLine(size.height - 1);
+    vLine(0);
+    vLine(size.width - 1);
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedBorderPainter old) => old.color != color;
 }
 
 class _SlotCard extends StatelessWidget {
