@@ -127,5 +127,43 @@ void main() {
       final next = await container.read(replacementsProvider.future);
       expect(next['T_Bkg_Hor_001']!.path, 'C:/img.png');
     });
+
+    test('setTransform updates offsets + zoom, leaves the image path alone',
+        () async {
+      await ReplacementsDataSource(tmp.path).save({
+        'T_Bkg_Wst_001': const TextureReplacement(
+          path: 'C:/poster.jpg',
+          offsetX: 0,
+          offsetY: 0,
+          zoom: 1.0,
+        ),
+      });
+
+      await container.read(replacementsControllerProvider).setTransform(
+            'T_Bkg_Wst_001',
+            offsetX: 17,
+            offsetY: -197,
+            zoom: 0.778,
+          );
+
+      final loaded = await read();
+      final entry = loaded['T_Bkg_Wst_001']!;
+      expect(entry.path, 'C:/poster.jpg'); // image untouched
+      expect(entry.offsetX, 17);
+      expect(entry.offsetY, -197);
+      expect(entry.zoom, closeTo(0.778, 1e-9));
+    });
+
+    test('setTransform is a no-op when the slot has no replacement', () async {
+      // No file at all — must not crash and must not materialise an entry
+      // (transform without a path makes no sense).
+      await container.read(replacementsControllerProvider).setTransform(
+            'T_Bkg_Hor_001',
+            offsetX: 5,
+            offsetY: 5,
+            zoom: 1.5,
+          );
+      expect(File(filePath()).existsSync(), isFalse);
+    });
   });
 }

@@ -112,6 +112,31 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
   }
+
+  /// Update the (offsetX, offsetY, zoom) crop transform for an existing
+  /// replacement. No-op when the slot has no image yet — the cropper UI
+  /// only appears after an image is set, so this guard is just defensive.
+  Future<void> setTransform(
+    String bkgTex, {
+    required int offsetX,
+    required int offsetY,
+    required double zoom,
+  }) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = ReplacementsDataSource(dir);
+    final current = await ds.load();
+    final existing = current[bkgTex];
+    if (existing == null) return;
+    final next = Map<String, TextureReplacement>.from(current);
+    next[bkgTex] = TextureReplacement(
+      path: existing.path,
+      offsetX: offsetX,
+      offsetY: offsetY,
+      zoom: zoom,
+    );
+    await ds.save(next);
+    _ref.invalidate(replacementsProvider);
+  }
 }
 
 final replacementsControllerProvider = Provider<ReplacementsController>(

@@ -6,7 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
+import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
+import 'cropping_preview.dart';
 import 'layout_style_picker.dart';
 
 /// Center column of the main layout: a large preview of the currently
@@ -52,12 +54,16 @@ class SlotPreview extends ConsumerWidget {
                 aspectRatio: 1024 / 2048,
                 child: _PreviewFrame(
                   bkgTex: slot.bkgTex,
-                  imagePath: repl?.path,
+                  replacement: repl,
                 ),
               ),
             ),
           ),
-          const SizedBox(height: kSp3),
+          if (repl != null) ...[
+            const SizedBox(height: kSp1),
+            _CropperStatus(bkgTex: slot.bkgTex, replacement: repl),
+          ],
+          const SizedBox(height: kSp2),
           Text(
             slot.pnName.isEmpty ? '(untitled)' : slot.pnName,
             style: const TextStyle(
@@ -98,15 +104,21 @@ class SlotPreview extends ConsumerWidget {
   }
 }
 
-/// Wraps the cover image in a clickable frame: clicking the frame opens
-/// a file picker and writes the chosen image to `replacements.json`.
-/// This is the same path the right-rail "UPLOAD"/"REPLACE" button uses,
-/// so users can act from either column.
+/// Cover-image frame.  Two distinct modes:
+///
+///   * **No image yet** — single-click opens a file picker (matches the
+///     "click to upload" affordance from the read-only era).  This is the
+///     same code path the right-rail UPLOAD button uses.
+///
+///   * **Image set** — frame becomes a [CroppingPreview]: drag to pan,
+///     mouse-wheel to zoom.  Replacement now goes through the right-rail
+///     REPLACE button only (matches Python — RR_VHS_Tool.py:11104+ uses
+///     the canvas exclusively for cropping, never for re-pick).
 class _PreviewFrame extends ConsumerStatefulWidget {
   final String bkgTex;
-  final String? imagePath;
+  final TextureReplacement? replacement;
 
-  const _PreviewFrame({required this.bkgTex, this.imagePath});
+  const _PreviewFrame({required this.bkgTex, this.replacement});
 
   @override
   ConsumerState<_PreviewFrame> createState() => _PreviewFrameState();
@@ -137,55 +149,119 @@ class _PreviewFrameState extends ConsumerState<_PreviewFrame> {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: _busy ? null : _pick,
-        child: Container(
-          decoration: BoxDecoration(
-            color: kColorPanel,
-            border: Border.all(color: kColorBorder),
+    final repl = widget.replacement;
+    final frameDeco = BoxDecoration(
+      color: kColorPanel,
+      border: Border.all(color: kColorBorder),
+    );
+
+    if (repl == null) {
+      return MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: _busy ? null : _pick,
+          child: Container(
+            decoration: frameDeco,
+            clipBehavior: Clip.antiAlias,
+            child: const _PreviewPlaceholder(
+              label: 'CLICK TO UPLOAD',
+              sublabel: 'PNG · JPG · WEBP · BMP',
+              icon: Icons.upload_file_outlined,
+              accent: kColorPink,
+            ),
           ),
-          clipBehavior: Clip.antiAlias,
-          child: _PreviewImage(path: widget.imagePath),
+        ),
+      );
+    }
+
+    return Container(
+      decoration: frameDeco,
+      clipBehavior: Clip.antiAlias,
+      child: CroppingPreview(
+        file: File(repl.path),
+        savedOffsetX: repl.offsetX,
+        savedOffsetY: repl.offsetY,
+        savedZoom: repl.zoom,
+        onCommit: (x, y, z) =>
+            ref.read(replacementsControllerProvider).setTransform(
+                  widget.bkgTex,
+                  offsetX: x,
+                  offsetY: y,
+                  zoom: z,
+                ),
+        onMissing: (_) => _PreviewPlaceholder(
+          label: 'IMAGE MISSING',
+          sublabel: repl.path,
+          isError: true,
         ),
       ),
     );
   }
 }
 
-class _PreviewImage extends StatelessWidget {
-  final String? path;
+/// Status strip under the cover: live offset/zoom readout + Reset link.
+/// Mirrors Python's `zoom_label` + `_reset_transform` (RR_VHS_Tool.py:11502
+/// and 11515-11530).
+class _CropperStatus extends ConsumerStatefulWidget {
+  final String bkgTex;
+  final TextureReplacement replacement;
 
-  const _PreviewImage({this.path});
+  const _CropperStatus({required this.bkgTex, required this.replacement});
+
+  @override
+  ConsumerState<_CropperStatus> createState() => _CropperStatusState();
+}
+
+class _CropperStatusState extends ConsumerState<_CropperStatus> {
+  bool _resetHover = false;
+
+  bool get _isDefault =>
+      widget.replacement.offsetX == 0 &&
+      widget.replacement.offsetY == 0 &&
+      widget.replacement.zoom == 1.0;
+
+  Future<void> _reset() async {
+    await ref.read(replacementsControllerProvider).setTransform(
+          widget.bkgTex,
+          offsetX: 0,
+          offsetY: 0,
+          zoom: 1.0,
+        );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final p = path;
-    if (p == null) {
-      return const _PreviewPlaceholder(
-        label: 'CLICK TO UPLOAD',
-        sublabel: 'PNG · JPG · WEBP · BMP',
-        icon: Icons.upload_file_outlined,
-        accent: kColorPink,
-      );
-    }
-    final file = File(p);
-    if (!file.existsSync()) {
-      return _PreviewPlaceholder(
-        label: 'IMAGE MISSING',
-        sublabel: p,
-        isError: true,
-      );
-    }
-    return Image.file(
-      file,
-      fit: BoxFit.cover,
-      errorBuilder: (context, error, stack) => _PreviewPlaceholder(
-        label: 'DECODE ERROR',
-        sublabel: p,
-        isError: true,
-      ),
+    final r = widget.replacement;
+    final readout =
+        'offset ${r.offsetX}, ${r.offsetY}  ·  zoom ${r.zoom.toStringAsFixed(2)}x';
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          readout,
+          style: const TextStyle(fontSize: kFsMeta, color: kColorText3),
+        ),
+        if (!_isDefault) ...[
+          const SizedBox(width: kSp2),
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            onEnter: (_) => setState(() => _resetHover = true),
+            onExit: (_) => setState(() => _resetHover = false),
+            child: GestureDetector(
+              onTap: _reset,
+              child: Text(
+                'reset',
+                style: TextStyle(
+                  fontSize: kFsMeta,
+                  color: _resetHover ? kColorPink : kColorText2,
+                  decoration:
+                      _resetHover ? TextDecoration.underline : null,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
