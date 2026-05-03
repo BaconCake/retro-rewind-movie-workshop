@@ -18,6 +18,14 @@ class SlotData {
   final int sku;
   final bool ntu;
 
+  /// Custom T_Sub texture name for this slot (e.g. `"T_Sub_78"`).  Null when
+  /// the slot reuses the row-synthesizer's hard-coded `T_Sub_01` (the safe
+  /// universal value — every base T_Sub is replaced with a transparent
+  /// version, so any T_Sub_NN < 78 reads identically transparent in-game).
+  /// Custom slots use T_Sub_78+ to avoid interfering with base-game uses.
+  /// RR_VHS_Tool.py:1044-1047, 1683-1694.
+  final String? subTex;
+
   const SlotData({
     required this.bkgTex,
     required this.pnName,
@@ -25,6 +33,7 @@ class SlotData {
     required this.lsc,
     required this.sku,
     this.ntu = false,
+    this.subTex,
   });
 
   SlotData copyWith({
@@ -34,6 +43,7 @@ class SlotData {
     int? lsc,
     int? sku,
     bool? ntu,
+    String? subTex,
   }) {
     return SlotData(
       bkgTex: bkgTex ?? this.bkgTex,
@@ -42,6 +52,7 @@ class SlotData {
       lsc: lsc ?? this.lsc,
       sku: sku ?? this.sku,
       ntu: ntu ?? this.ntu,
+      subTex: subTex ?? this.subTex,
     );
   }
 }

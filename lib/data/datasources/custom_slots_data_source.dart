@@ -74,6 +74,7 @@ class CustomSlotsDataSource {
     final pnName = m['pn_name'];
     if (bkgTex is! String || bkgTex.isEmpty) return null;
     if (pnName is! String) return null;
+    final subTex = m['sub_tex'];
     return SlotData(
       bkgTex: bkgTex,
       pnName: pnName,
@@ -81,6 +82,7 @@ class CustomSlotsDataSource {
       lsc: (m['lsc'] as num?)?.toInt() ?? 4,
       sku: (m['sku'] as num?)?.toInt() ?? 0,
       ntu: m['ntu'] as bool? ?? false,
+      subTex: subTex is String && subTex.isNotEmpty ? subTex : null,
     );
   }
 }

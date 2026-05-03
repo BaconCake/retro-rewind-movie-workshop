@@ -9,12 +9,14 @@ import '../../domain/entities/app_config.dart';
 import '../../domain/entities/build_result.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../../domain/repositories/pak_builder.dart';
+import '../../core/constants/tsub_template.dart';
 import '../datasources/custom_slots_data_source.dart';
 import '../datasources/replacements_data_source.dart';
 import '../datatable/datatable_builder.dart';
 import '../datatable/datatable_manager.dart';
 import '../datatable/slot_data.dart';
 import '../services/pak_cache.dart';
+import '../services/transparent_tsub_builder.dart';
 import 'texture_injector_impl.dart';
 
 /// Build pipeline.  Mirrors the Python `_build()` flow (RR_VHS_Tool.py:13860-
@@ -132,6 +134,14 @@ class PakBuilderImpl implements PakBuilder {
     // + template uexp + zero ubulk = black cover) so the row reference still
     // resolves to a real asset and doesn't render as missing.
     await _writeTextures(config, workRoot.path, customSlots, replacements);
+
+    // Inject the always-transparent T_Sub batch.  Without this the base
+    // game's procedural subject artwork remains visible on top of every
+    // cover.  We always emit T_Sub_01..T_Sub_77, plus any T_Sub_78+ names
+    // referenced by a custom slot's sub_tex field.  All identical
+    // transparent images so sharing names across slots is safe.
+    // RR_VHS_Tool.py:14007-14060.
+    await _writeTransparentSubjects(workRoot.path, customSlots);
 
     // Output pak path (next to working dir, like Python's OUTPUT_DIR).
     final pakPath = p.join(workingDir, kOutputPakFilename);
@@ -261,6 +271,47 @@ class PakBuilderImpl implements PakBuilder {
     }
     _log('Textures written: $injected injected, $placeholders placeholder, '
         '$failed failed (of $totalSlots)');
+  }
+
+  Future<void> _writeTransparentSubjects(
+      String workRoot, Map<String, List<SlotData>> customSlots) async {
+    final names = <String>{...TransparentTSubBuilder.baseTSubNames()};
+    for (final list in customSlots.values) {
+      for (final slot in list) {
+        final st = slot.subTex;
+        if (st == null) continue;
+        // Only T_Sub_78+ go through here (the < 78 range is base-game-style
+        // and already in the always-emit set).  Names that don't fit the
+        // 8-char T_Sub_NN shape get folded to T_Sub_78 by the builder.
+        names.add(st);
+      }
+    }
+
+    final destDir = Directory(p.join(workRoot, 'RetroRewind', 'Content',
+        'VideoStore', 'asset', 'prop', 'vhs', 'Subject'));
+    await destDir.create(recursive: true);
+
+    const builder = TransparentTSubBuilder();
+    final sortedNames = names.toList()..sort();
+    var ok = 0;
+    for (final name in sortedNames) {
+      try {
+        final art = builder.build(name);
+        await Future.wait([
+          File(p.join(destDir.path, '$name.uasset')).writeAsBytes(art.uasset),
+          File(p.join(destDir.path, '$name.uexp')).writeAsBytes(art.uexp),
+        ]);
+        ok++;
+      } catch (e) {
+        _log('  T_Sub FAIL $name: $e');
+      }
+    }
+    final customCount = sortedNames.where((n) {
+      final num = int.tryParse(n.replaceFirst('T_Sub_', ''));
+      return num != null && num >= kTSubCustomBase;
+    }).length;
+    _log('Transparent T_Subs written: $ok '
+        '(${sortedNames.length - customCount} base + $customCount custom)');
   }
 
   Future<String?> _copyWithRetry(String src, String dst) async {
