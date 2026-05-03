@@ -51,3 +51,17 @@ const String kFlutterBuildVersion = 'v0.1.0-flutter';
 /// Output pak filename. The leading "zzzzzz_" sorts after RetroRewind-Windows.pak
 /// so our overrides win at load time (RR_VHS_Tool.py:23-24).
 const String kOutputPakFilename = 'zzzzzz_MovieWorkshop_P.pak';
+
+/// Parse a `T_Bkg_<code>_<num>` texture name and return the matching
+/// `GenreInfo`, or null if the name doesn't follow that shape or the code
+/// isn't a known genre.  Mirrors Python's `parts = name.split('_')` /
+/// `genre_code_fb = parts[2]` (RR_VHS_Tool.py:5658-5661).
+GenreInfo? parseGenreFromTextureName(String textureName) {
+  final parts = textureName.split('_');
+  if (parts.length < 4) return null;
+  final code = parts[2];
+  for (final g in kGenres) {
+    if (g.code == code) return g;
+  }
+  return null;
+}

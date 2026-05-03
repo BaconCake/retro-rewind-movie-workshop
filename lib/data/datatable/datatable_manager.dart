@@ -25,17 +25,27 @@ class DataTableManager {
     AppConfig config, {
     Map<String, List<SlotData>>? slotOverrides,
     Map<String, Map<String, String>>? titleOverridesByGenre,
+    Map<String, Map<int, String>>? bkgTexPatchesByDt,
     void Function(String dtName, String message)? log,
   }) async {
     final out = <String, DataTableBuildResult>{};
     for (final g in kGenres) {
       final dt = g.dataTableName;
+      // CUSTOM_ONLY_MODE: only rebuild DataTables for genres that have
+      // explicit slot overrides.  Genres without overrides are intentionally
+      // omitted from the mod pak so the engine falls through to the base
+      // game's DataTable (showing the original movies untouched).  Mirrors
+      // Python's `save_datatable` when `CUSTOM_ONLY_MODE = True`
+      // (RR_VHS_Tool.py:5040-5045).
+      final overrides = slotOverrides?[dt];
+      if (overrides == null || overrides.isEmpty) continue;
       log?.call(dt, 'building...');
       final result = await builder.build(
         config,
         dt,
-        slotOverride: slotOverrides?[dt],
+        slotOverride: overrides,
         titleOverrides: titleOverridesByGenre?[dt] ?? const {},
+        bkgTexPatches: bkgTexPatchesByDt?[dt] ?? const {},
       );
       out[dt] = result;
       log?.call(dt,

@@ -94,27 +94,52 @@ class BuildState {
 
 class BuildController extends StateNotifier<BuildState> {
   final Ref _ref;
+  IOSink? _logSink;
 
   BuildController(this._ref) : super(const BuildState()) {
     _ref.read(pakBuilderProvider).logStream.listen((line) {
       state = state.copyWith(log: [...state.log, line]);
+      _logSink?.writeln(line);
     });
   }
+
+  /// Persistent path of the most recent build log.  Truncated on each `ship()`
+  /// call.  Lives next to `config.json` so it's easy to find and share when
+  /// debugging an unexpected build outcome.
+  String get logFilePath =>
+      p.join(_ref.read(workingDirProvider), 'build_last.log');
 
   Future<void> ship() async {
     if (state.isRunning) return;
     state = const BuildState(isRunning: true, log: []);
 
-    final config = await _ref.read(configRepositoryProvider).load();
-    final result = await _ref.read(pakBuilderProvider).build(config);
+    // Truncate + open append-mode sink so log lines persist even if a later
+    // step crashes the isolate.
+    await _logSink?.close();
+    final logFile = File(logFilePath);
+    try {
+      await logFile.writeAsString(''); // truncate
+      _logSink = logFile.openWrite(mode: FileMode.append);
+    } catch (_) {
+      _logSink = null; // best-effort; the in-memory log still works
+    }
 
-    state = state.copyWith(
-      isRunning: false,
-      lastErrorCode: result.errorCode,
-      lastErrorMessage: result.errorMessage,
-      lastPakSizeBytes: result.pakSizeBytes,
-      lastInstalledPath: result.installedPath,
-    );
+    try {
+      final config = await _ref.read(configRepositoryProvider).load();
+      final result = await _ref.read(pakBuilderProvider).build(config);
+
+      state = state.copyWith(
+        isRunning: false,
+        lastErrorCode: result.errorCode,
+        lastErrorMessage: result.errorMessage,
+        lastPakSizeBytes: result.pakSizeBytes,
+        lastInstalledPath: result.installedPath,
+      );
+    } finally {
+      await _logSink?.flush();
+      await _logSink?.close();
+      _logSink = null;
+    }
   }
 }
 

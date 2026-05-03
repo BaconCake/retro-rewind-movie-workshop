@@ -7,24 +7,35 @@ import '../../core/constants/genres.dart';
 import '../../core/utils/build_error.dart';
 import '../../domain/entities/app_config.dart';
 import '../../domain/entities/build_result.dart';
+import '../../domain/entities/texture_replacement.dart';
 import '../../domain/repositories/pak_builder.dart';
+import '../datasources/custom_slots_data_source.dart';
+import '../datasources/replacements_data_source.dart';
 import '../datatable/datatable_builder.dart';
 import '../datatable/datatable_manager.dart';
+import '../datatable/slot_data.dart';
 import '../services/pak_cache.dart';
+import 'texture_injector_impl.dart';
 
-/// Build pipeline. Mirrors the Python `_build()` flow in RR_VHS_Tool.py:14134.
-/// Slice 2c-D wires the full DataTable rebuild path: base-game slots are
-/// decoded, re-synthesised, and written into the work tree alongside
-/// AssetRegistry. The output pak now contains real Unreal DataTable assets
-/// (one row per slot, vs the base game's 77 rows per slot).
+/// Build pipeline.  Mirrors the Python `_build()` flow (RR_VHS_Tool.py:13860-
+/// 14150) operating in CUSTOM_ONLY_MODE: the mod pak only contains the genres
+/// the user has actually customised.  Genres without `custom_slots.json`
+/// entries are intentionally absent so the engine falls through to the base
+/// game's DataTable for those genres.
 class PakBuilderImpl implements PakBuilder {
   final String workingDir;
   final PakCache _pakCache;
   late final DataTableManager _dataTables;
+  late final TextureInjectorImpl _injector;
+  late final ReplacementsDataSource _replacementsDataSource;
+  late final CustomSlotsDataSource _customSlotsDataSource;
   final _logController = StreamController<String>.broadcast();
 
   PakBuilderImpl(this.workingDir) : _pakCache = PakCache(workingDir) {
     _dataTables = DataTableManager(DataTableBuilder(_pakCache));
+    _injector = TextureInjectorImpl(pakCache: _pakCache);
+    _replacementsDataSource = ReplacementsDataSource(workingDir);
+    _customSlotsDataSource = CustomSlotsDataSource(workingDir);
   }
 
   PakCache get pakCache => _pakCache;
@@ -40,8 +51,6 @@ class PakBuilderImpl implements PakBuilder {
   Future<BuildResult> build(AppConfig config) async {
     _log('Starting build (Flutter port $kFlutterBuildVersion)');
 
-    // Validate config — the buttons in the UI check this too, but a CLI/test
-    // entry point should fail loudly.
     if (!config.hasRepak || !File(config.repak).existsSync()) {
       return _fail('E009', 'repak.exe path missing or invalid: "${config.repak}"');
     }
@@ -78,17 +87,28 @@ class PakBuilderImpl implements PakBuilder {
       _log('WARNING: ${ar.warning}');
     }
 
-    // Build all 13 DataTables: base game slots → re-synthesised uasset+uexp
-    // pairs. With no title overrides this is a "no-op" rebuild — the pak
-    // contains structurally-fresh DataTables that should still load and
-    // present the same movies in-game. Once UI for editing is added, the
-    // overrides parameter is where user changes flow in.
+    // Load both per-machine state files.
+    //   replacements.json — keyed by texture name → user image path + offsets.
+    //   custom_slots.json — keyed by DataTable name → ordered slot metadata.
+    // Python keeps the two files in lockstep via its UI; the Flutter port
+    // just consumes whatever is on disk.  Slice 4 will add the editor.
+    final replacements = await _safeLoadReplacements();
+    final customSlots = await _safeLoadCustomSlots();
+
+    if (customSlots.isEmpty) {
+      _log('No custom_slots.json entries — pak will be a no-op '
+          '(AssetRegistry only).');
+    }
+
+    // Build DataTables only for genres present in customSlots.  The manager
+    // skips any genre without an override (CUSTOM_ONLY_MODE).
     final dtDir =
         Directory(p.join(workRoot.path, kDataTableRootPath));
     await dtDir.create(recursive: true);
     try {
       final results = await _dataTables.buildAll(
         config,
+        slotOverrides: customSlots,
         log: (dt, msg) => _log('DataTable[$dt]: $msg'),
       );
       for (final entry in results.entries) {
@@ -99,12 +119,19 @@ class PakBuilderImpl implements PakBuilder {
         await File(p.join(dtDir.path, '$dt.uexp'))
             .writeAsBytes(r.uexpBytes);
       }
-      _log('Wrote ${results.length} DataTables to ${dtDir.path}');
+      _log('Wrote ${results.length} custom DataTables to ${dtDir.path}');
     } on DataTableBuildError catch (e) {
       return _fail(e.code, '${e.dataTableName}: ${e.message}');
     } catch (e) {
       return _fail('E004', 'DataTable build threw: $e');
     }
+
+    // Write the texture files for every custom slot listed in customSlots.
+    // Slots with a replacement entry get the user image (texconv'd → ubulk +
+    // inline mips); slots without get the placeholder triple (cloned uasset
+    // + template uexp + zero ubulk = black cover) so the row reference still
+    // resolves to a real asset and doesn't render as missing.
+    await _writeTextures(config, workRoot.path, customSlots, replacements);
 
     // Output pak path (next to working dir, like Python's OUTPUT_DIR).
     final pakPath = p.join(workingDir, kOutputPakFilename);
@@ -158,6 +185,82 @@ class PakBuilderImpl implements PakBuilder {
       installedPath: installedPath,
       pakSizeBytes: size,
     );
+  }
+
+  Future<Map<String, TextureReplacement>> _safeLoadReplacements() async {
+    try {
+      return await _replacementsDataSource.load();
+    } catch (e) {
+      _log('Skipping replacements: replacements.json unreadable ($e)');
+      return const {};
+    }
+  }
+
+  Future<Map<String, List<SlotData>>> _safeLoadCustomSlots() async {
+    try {
+      return await _customSlotsDataSource.load();
+    } catch (e) {
+      _log('Skipping custom slots: custom_slots.json unreadable ($e)');
+      return const {};
+    }
+  }
+
+  Future<void> _writeTextures(
+      AppConfig config,
+      String workRoot,
+      Map<String, List<SlotData>> customSlots,
+      Map<String, TextureReplacement> replacements) async {
+    var injected = 0;
+    var placeholders = 0;
+    var failed = 0;
+    final totalSlots =
+        customSlots.values.fold<int>(0, (a, list) => a + list.length);
+    if (totalSlots == 0) return;
+
+    _log('Writing $totalSlots custom texture slot(s)...');
+    for (final entry in customSlots.entries) {
+      for (final slot in entry.value) {
+        final name = slot.bkgTex;
+        // Slice 3 only handles `T_Bkg_*` slots.  T_New / NR will come in 3c.
+        if (!name.startsWith('T_Bkg_')) {
+          _log('  SKIP $name: not T_Bkg (deferred to slice 3c)');
+          continue;
+        }
+        final genre = parseGenreFromTextureName(name);
+        if (genre == null) {
+          _log('  SKIP $name: cannot parse genre');
+          continue;
+        }
+        final replacement = replacements[name];
+        try {
+          if (replacement != null) {
+            await _injector.inject(
+              config: config,
+              workRoot: workRoot,
+              textureName: name,
+              genreCode: genre.code,
+              replacement: replacement,
+            );
+            injected++;
+            _log('  INJECT      $name');
+          } else {
+            await _injector.writePlaceholder(
+              config: config,
+              workRoot: workRoot,
+              textureName: name,
+              genreCode: genre.code,
+            );
+            placeholders++;
+            _log('  PLACEHOLDER $name');
+          }
+        } catch (e) {
+          failed++;
+          _log('  FAIL        $name: $e');
+        }
+      }
+    }
+    _log('Textures written: $injected injected, $placeholders placeholder, '
+        '$failed failed (of $totalSlots)');
   }
 
   Future<String?> _copyWithRetry(String src, String dst) async {

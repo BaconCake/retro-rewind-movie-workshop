@@ -70,6 +70,7 @@ class DataTableBuilder {
     String dataTableName, {
     List<SlotData>? slotOverride,
     Map<String, String> titleOverrides = const {},
+    Map<int, String> bkgTexPatches = const {},
   }) async {
     // 1) Extract base files.
     final uaRes = await pakCache.extractFile(
@@ -100,12 +101,28 @@ class DataTableBuilder {
     } on DataTableParseError catch (e) {
       throw DataTableBuildError('E015', dataTableName, e.message);
     }
-    final slots = slotOverride ??
+    final baseSlots = slotOverride ??
         RowDecoder.decodeBaseSlots(parsed.uexp, parsed.uasset.nameTable);
-    if (slots.isEmpty) {
+    if (baseSlots.isEmpty) {
       throw DataTableBuildError(
           'E004', dataTableName, 'no slots decoded from base uexp');
     }
+
+    // Apply bkg-tex patches (e.g. swap a base-game 2-digit ref like
+    // `T_Bkg_Dra_01` for a custom 3-digit ref `T_Bkg_Dra_001` so the rebuilt
+    // DataTable points at a user-supplied texture).  Patch keys are 1-based
+    // slot indices; out-of-range patches are silently dropped (the texture
+    // file is still written but no row references it — that's the slice 3
+    // limitation).  Adding new rows for out-of-range custom slots is slice 4
+    // territory.
+    final slots = bkgTexPatches.isEmpty
+        ? baseSlots
+        : List<SlotData>.generate(baseSlots.length, (i) {
+            final patch = bkgTexPatches[i + 1];
+            return patch == null
+                ? baseSlots[i]
+                : baseSlots[i].copyWith(bkgTex: patch);
+          });
 
     // 3+4+5) Extend name table, synthesise rows.
     final extender = NameTableExtender(parsed.uasset);

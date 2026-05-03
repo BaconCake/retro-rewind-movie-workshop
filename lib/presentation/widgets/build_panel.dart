@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/providers.dart';
@@ -30,8 +31,32 @@ class BuildPanel extends ConsumerWidget {
             label: Text(state.isRunning ? 'Building...' : 'Ship to Store'),
           ),
           const SizedBox(height: 12),
-          Text('Build log',
-              style: Theme.of(context).textTheme.titleSmall),
+          Row(
+            children: [
+              Expanded(
+                child: Text('Build log',
+                    style: Theme.of(context).textTheme.titleSmall),
+              ),
+              IconButton(
+                tooltip: 'Copy log to clipboard',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.content_copy, size: 16),
+                onPressed: state.log.isEmpty
+                    ? null
+                    : () async {
+                        await Clipboard.setData(
+                            ClipboardData(text: state.log.join('\n')));
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Log copied to clipboard'),
+                                duration: Duration(seconds: 1)),
+                          );
+                        }
+                      },
+              ),
+            ],
+          ),
           const SizedBox(height: 4),
           Expanded(
             child: Container(

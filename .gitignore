@@ -22,3 +22,10 @@ config.json
 build_work/
 .pak_cache/
 zzzzzz_MovieWorkshop_P.pak
+build_last.log
+replacements.json
+title_changes.json
+custom_slots.json
+nr_custom_slots.json
+shipped_slots.json
+base_slot_edits.json

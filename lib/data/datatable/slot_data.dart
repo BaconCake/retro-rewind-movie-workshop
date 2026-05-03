@@ -26,4 +26,22 @@ class SlotData {
     required this.sku,
     this.ntu = false,
   });
+
+  SlotData copyWith({
+    String? bkgTex,
+    String? pnName,
+    int? ls,
+    int? lsc,
+    int? sku,
+    bool? ntu,
+  }) {
+    return SlotData(
+      bkgTex: bkgTex ?? this.bkgTex,
+      pnName: pnName ?? this.pnName,
+      ls: ls ?? this.ls,
+      lsc: lsc ?? this.lsc,
+      sku: sku ?? this.sku,
+      ntu: ntu ?? this.ntu,
+    );
+  }
 }
