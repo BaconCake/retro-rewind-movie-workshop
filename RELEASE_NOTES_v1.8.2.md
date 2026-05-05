@@ -21,13 +21,20 @@ The known Discord workaround was to hand-edit `nr_custom_slots.json` and assign 
 
 **Sort dropdown for genre tabs and the New Releases tab.** Sort by name, by when you added the entry, or by when you last edited it. Each tab remembers its own sort. The "All Movies" overview keeps its natural order on purpose.
 
+A note for v1.8.1 saves: movies created before this update don't have "created at" or "last edited at" timestamps stored — those fields are new. "Last edited at" gets filled in the next time you edit such a movie. "Created at" can't be backfilled retroactively, so the date sorts treat un-timestamped entries as a separate group: they show up after the timestamped ones, in slot order (for genre tabs) or grouped by genre then slot number (for New Releases). Movies you create in v1.8.2 onward sort correctly by their actual dates. Sort by name works for everyone.
+
 **Older save files migrate automatically.** If your `nr_custom_slots.json` is from v1.8.1, the tool reads it on launch and renumbers any duplicate texture slots so each NR ends up with a unique cover. Titles, SKUs, and cover image assignments are preserved.
 
 If you previously assigned cover images that didn't appear in-game (because of the overwrite bug), they should appear correctly after upgrading.
 
-## How far we've tested
+**Smaller fixes**
 
-50 New Releases per genre — around 550 total across the eleven NR-capable genres — built and loaded without issues. Higher numbers should be fine, but they're not verified. If you push into the thousands and something breaks, please open an issue or let me know on Discord.
+- "Remove all custom movies" now also resets the per-movie status badges. Before, new movies you added in the freed slots could appear as "Shipped" or "Edited", inheriting state from the deleted ones.
+- The "Edited" badge updates right away after changing rating, rarity, or rotating an image — not only after the next image upload on some other slot.
+
+## How far I've tested
+
+I tested with 50 New Releases per genre — around 550 total across the eleven NR-capable genres — and everything built and loaded without issues. Higher numbers should be fine, but I haven't verified them. If you push into the thousands and something breaks, please open an issue or let me know on Discord.
 
 ## Upgrading from v1.8.1
 
