@@ -2,9 +2,13 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
+import '../../data/services/cover_actions.dart';
+import '../providers/providers.dart';
+import 'cover_image.dart';
 
 /// Live cropper preview — port of the drag/zoom interaction on Python's
 /// preview canvas (RR_VHS_Tool.py:7927-7949 + 11104-11290 + 11502-11530).
@@ -29,6 +33,11 @@ class CroppingPreview extends StatefulWidget {
   final int savedOffsetY;
   final double savedZoom;
 
+  /// Layout style (1..5) of the slot the image is cropped for.  Drives the
+  /// safe-area / hidden-zone overlays via [layoutVisibleRect].  Values
+  /// outside 1..5 fall back to the layout-agnostic kHidden* bands.
+  final int layout;
+
   /// Live update during drag/scroll (every frame).
   final void Function(int offsetX, int offsetY, double zoom)? onPreview;
 
@@ -39,15 +48,45 @@ class CroppingPreview extends StatefulWidget {
   /// Called when the file does not exist at build time.
   final WidgetBuilder onMissing;
 
+  /// Bumped by the parent after an in-place file rewrite (e.g. ↻ Rotate) so
+  /// the cached `Image.file` is rebuilt against the freshly written bytes
+  /// instead of the stale image-cache entry.
+  final int imageGeneration;
+
+  /// Source image natural pixel dimensions.  Required for Pythons render
+  /// math; the parent reads them from `imageDimensionsProvider` and shows
+  /// a placeholder while the future is loading instead of mounting this
+  /// widget without dims.
+  final int imageWidth;
+  final int imageHeight;
+
+  /// When true, drags snap to safe-area centre / edges and canvas edges
+  /// (40-px radius in canvas-coords).  Read from `snapEnabledProvider` by
+  /// the parent.
+  final bool snapEnabled;
+
+  /// When true, the safe-area overlay (red hatched hidden zones + cyan
+  /// dashed visible-area border) is painted on the canvas.  Snap guides
+  /// are unaffected — they show on snap-to-centre regardless of this
+  /// flag, matching Pythons `_show_snap_guides` (RR_VHS_Tool.py:11450).
+  /// Parent reads `layoutOverlayProvider` and passes it here.
+  final bool showOverlay;
+
   const CroppingPreview({
     super.key,
     required this.file,
     required this.savedOffsetX,
     required this.savedOffsetY,
     required this.savedZoom,
+    required this.layout,
+    required this.imageWidth,
+    required this.imageHeight,
     required this.onCommit,
     required this.onMissing,
     this.onPreview,
+    this.imageGeneration = 0,
+    this.snapEnabled = true,
+    this.showOverlay = false,
   });
 
   @override
@@ -61,16 +100,44 @@ class _CroppingPreviewState extends State<CroppingPreview> {
   int? _liveY;
   double? _liveZoom;
 
+  // True between onPanStart and onPanEnd.  While set, we ignore any
+  // savedOffsetX/Y prop changes — the parent mirrors our own onPreview
+  // values back as `saved*`, and reacting to those would break the
+  // `newX = savedOffsetX + accum` math by double-applying the delta.
+  bool _isPanning = false;
+
+  // Live snap-to-centre flags during drag — drive the cyan dashed guide
+  // lines on the safe-area centre axis (RR_VHS_Tool.py:11450-11502).
+  bool _centerSnapX = false;
+  bool _centerSnapY = false;
+
   // Drag accounting in texture-pixel space (we accumulate fractional
   // remainders so small mouse moves don't get lost to integer rounding).
   double _dragAccumX = 0;
   double _dragAccumY = 0;
 
+  // ── Viewport state (4e.3-4e.5) ───────────────────────────────────────
+  // Pythons `_viewport_zoom` / `_viewport_pan_x/y` (RR_VHS_Tool.py:7943,
+  // 11765).  These scale and translate the entire canvas display — image
+  // + safe-area overlays included — without touching the saved per-slot
+  // crop transform.  Reset to defaults when the slot changes (the parent
+  // `_CoverEditorBlock` carries a ValueKey on `slot.bkgTex`, so we get
+  // remounted with fresh state).
+  double _vzoom = 1.0;
+  double _vpanX = 0;
+  double _vpanY = 0;
+  bool _vPanning = false;
+  double _vPanStartScreenX = 0;
+  double _vPanStartScreenY = 0;
+  double _vPanOrigX = 0;
+  double _vPanOrigY = 0;
+
   @override
   void didUpdateWidget(covariant CroppingPreview old) {
     super.didUpdateWidget(old);
-    // If saved values change while we're not dragging, drop any stale live
-    // overrides so the preview reflects what's on disk.
+    // Never disturb live state mid-pan: the saved props are echoing our
+    // own preview output and resetting _live here would compound the drag.
+    if (_isPanning) return;
     if (_liveX == null && _liveY == null && _liveZoom == null) return;
     if (old.savedOffsetX != widget.savedOffsetX ||
         old.savedOffsetY != widget.savedOffsetY ||
@@ -88,6 +155,11 @@ class _CroppingPreviewState extends State<CroppingPreview> {
   void _onPanStart(DragStartDetails _) {
     _dragAccumX = 0;
     _dragAccumY = 0;
+    _isPanning = true;
+    // Pin the saved values at gesture start so accum-based math stays
+    // stable even if the parent echoes our preview output back.
+    _panBaseX = widget.savedOffsetX;
+    _panBaseY = widget.savedOffsetY;
     setState(() {
       _liveX = widget.savedOffsetX;
       _liveY = widget.savedOffsetY;
@@ -95,41 +167,138 @@ class _CroppingPreviewState extends State<CroppingPreview> {
     });
   }
 
+  // Snapshot of saved offset at pan start — the source of truth for
+  // `newX = base + accum` so the math doesn't double-count parent echoes.
+  int _panBaseX = 0;
+  int _panBaseY = 0;
+
   void _onPanUpdate(DragUpdateDetails d, Size displaySize) {
     // Drag deltas come in display-pixel space. Convert to texture-pixel
-    // space by dividing by the display→texture ratio.
-    final scale = displaySize.width / kTextureBkgWidth;
+    // space by dividing by the display→texture ratio AND the current
+    // viewport zoom — at vz>1 the canvas is rendered larger so each
+    // mouse pixel covers fewer canvas pixels (RR_VHS_Tool.py:11140-11150
+    // uses `scale_x = TEX_WIDTH / dw` where `dw = base_dw * vz`).
+    final scale = displaySize.width / kTextureBkgWidth * _vzoom;
     _dragAccumX += d.delta.dx / scale;
     _dragAccumY += d.delta.dy / scale;
-    final newX = widget.savedOffsetX + _dragAccumX.round();
-    final newY = widget.savedOffsetY + _dragAccumY.round();
+    var newX = _panBaseX + _dragAccumX.round();
+    var newY = _panBaseY + _dragAccumY.round();
+
+    var centerSnapX = false;
+    var centerSnapY = false;
+    if (widget.snapEnabled &&
+        widget.imageWidth > 0 &&
+        widget.imageHeight > 0) {
+      final s = applyDragSnap(
+        rawOffsetX: newX,
+        rawOffsetY: newY,
+        imageWidth: widget.imageWidth,
+        imageHeight: widget.imageHeight,
+        zoom: _zoom,
+        layout: widget.layout,
+      );
+      newX = s.offsetX;
+      newY = s.offsetY;
+      centerSnapX = s.centerSnapX;
+      centerSnapY = s.centerSnapY;
+    }
+
     setState(() {
       _liveX = newX;
       _liveY = newY;
+      _centerSnapX = centerSnapX;
+      _centerSnapY = centerSnapY;
     });
     widget.onPreview?.call(newX, newY, _zoom);
   }
 
   void _onPanEnd(DragEndDetails _) {
     final x = _x, y = _y, z = _zoom;
+    _isPanning = false;
     setState(() {
-      _liveX = null;
-      _liveY = null;
-      _liveZoom = null;
+      // Drop the snap guides as soon as the user releases — Pythons
+      // `_show_snap_guides` likewise only paints them while the drag is
+      // live (RR_VHS_Tool.py:11450-11458).
+      _centerSnapX = false;
+      _centerSnapY = false;
     });
+    // Keep _live populated so the next build still shows the dragged
+    // position; it gets cleared in didUpdateWidget once the parent's
+    // commit lands and saved* equals what we just sent.
     widget.onCommit(x, y, z);
   }
 
-  void _onScroll(PointerSignalEvent e) {
+  // Wheel = viewport zoom (RR_VHS_Tool.py:7820-7860).  Pythons binding
+  // is wheel-on-canvas ↔ `_viewport_zoom`, NOT the saved image zoom; the
+  // image zoom is reachable only via the slider / +/− buttons in the
+  // editor bar.  Zoom snaps toward the mouse position so the canvas
+  // point under the cursor stays put.
+  void _onScroll(PointerSignalEvent e, Size displaySize) {
     if (e is! PointerScrollEvent) return;
-    // Wheel up (negative dy) → zoom in.
     final dir = e.scrollDelta.dy > 0 ? -1 : 1;
-    final next = (_zoom + dir * 0.05).clamp(0.25, 4.0);
-    if (next == _zoom) return;
-    setState(() => _liveZoom = next);
-    widget.onPreview?.call(_x, _y, next);
-    // Persist immediately for scroll — no clean "release" event.
-    widget.onCommit(_x, _y, next);
+    final next = (((_vzoom + dir * 0.1) * 100).round() / 100).clamp(0.25, 4.0);
+    if (next == _vzoom) return;
+
+    // Zoom toward the cursor (Pythons rel-x/rel-y math).
+    final mx = e.localPosition.dx - displaySize.width / 2;
+    final my = e.localPosition.dy - displaySize.height / 2;
+    final oldDw = displaySize.width * _vzoom;
+    final oldDh = displaySize.height * _vzoom;
+    final relX = oldDw == 0 ? 0.0 : (mx - _vpanX) / oldDw;
+    final relY = oldDh == 0 ? 0.0 : (my - _vpanY) / oldDh;
+    final newDw = displaySize.width * next;
+    final newDh = displaySize.height * next;
+    var nx = mx - relX * newDw;
+    var ny = my - relY * newDh;
+    // Snap pan to 0 at vz=1 — Pythons does the same to stop tiny float
+    // drifts from accumulating across many wheel ticks.
+    if ((next - 1.0).abs() < 1e-6) {
+      nx = 0;
+      ny = 0;
+    }
+    setState(() {
+      _vzoom = next.toDouble();
+      _vpanX = nx;
+      _vpanY = ny;
+    });
+  }
+
+  void _onPointerDown(PointerDownEvent e, Size displaySize) {
+    // Middle-mouse = viewport pan start.  Other buttons fall through to
+    // the inner GestureDetector (left = image drag).
+    if (e.buttons & kMiddleMouseButton == 0) return;
+    _vPanning = true;
+    _vPanStartScreenX = e.localPosition.dx;
+    _vPanStartScreenY = e.localPosition.dy;
+    _vPanOrigX = _vpanX;
+    _vPanOrigY = _vpanY;
+  }
+
+  void _onPointerMove(PointerMoveEvent e, Size displaySize) {
+    if (!_vPanning) return;
+    var nx = _vPanOrigX + (e.localPosition.dx - _vPanStartScreenX);
+    var ny = _vPanOrigY + (e.localPosition.dy - _vPanStartScreenY);
+    // Clamp so at least half the rendered image stays on screen
+    // (RR_VHS_Tool.py:11364-11376).
+    final dw = displaySize.width * _vzoom;
+    final dh = displaySize.height * _vzoom;
+    final maxPx = (dw / 2 > displaySize.width / 2)
+        ? dw / 2
+        : displaySize.width / 2;
+    final maxPy = (dh / 2 > displaySize.height / 2)
+        ? dh / 2
+        : displaySize.height / 2;
+    nx = nx.clamp(-maxPx, maxPx);
+    ny = ny.clamp(-maxPy, maxPy);
+    setState(() {
+      _vpanX = nx;
+      _vpanY = ny;
+    });
+  }
+
+  void _onPointerUp(PointerUpEvent _) {
+    if (!_vPanning) return;
+    setState(() => _vPanning = false);
   }
 
   @override
@@ -141,44 +310,618 @@ class _CroppingPreviewState extends State<CroppingPreview> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
-        final scale = size.width / kTextureBkgWidth; // = h/2048
-        final tx = _x * scale;
-        final ty = _y * scale;
-        return Listener(
-          onPointerSignal: _onScroll,
-          child: MouseRegion(
-            cursor: SystemMouseCursors.move,
-            child: GestureDetector(
-              onPanStart: _onPanStart,
-              onPanUpdate: (d) => _onPanUpdate(d, size),
-              onPanEnd: _onPanEnd,
-              child: ClipRect(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Container(color: kColorBg),
-                    Transform.translate(
-                      offset: Offset(tx, ty),
-                      child: Transform.scale(
-                        scale: _zoom,
-                        alignment: Alignment.center,
-                        child: Image.file(
-                          widget.file,
-                          fit: BoxFit.cover,
-                          // cap memory: 4× preview width is enough for sharp
-                          // rendering even when zoomed in.
-                          cacheWidth:
-                              (size.width * 4).clamp(256, 4096).round(),
+        // The viewport (zoom + pan) is applied OUTSIDE the cover-image
+        // stack so the safe-area overlay zooms with the canvas — that's
+        // what makes wheel-zoom feel like a magnifier on the canvas
+        // itself.  The "?" help button stays outside the viewport so it
+        // remains anchored to the cropper frame.
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            Listener(
+              onPointerSignal: (e) => _onScroll(e, size),
+              onPointerDown: (e) => _onPointerDown(e, size),
+              onPointerMove: (e) => _onPointerMove(e, size),
+              onPointerUp: _onPointerUp,
+              child: MouseRegion(
+                cursor: _vPanning
+                    ? SystemMouseCursors.grabbing
+                    : SystemMouseCursors.move,
+                child: GestureDetector(
+                  onPanStart: _onPanStart,
+                  onPanUpdate: (d) => _onPanUpdate(d, size),
+                  onPanEnd: _onPanEnd,
+                  child: ClipRect(
+                    child: Transform(
+                      alignment: Alignment.center,
+                      transform: Matrix4.identity()
+                        ..translateByDouble(_vpanX, _vpanY, 0, 1)
+                        ..scaleByDouble(_vzoom, _vzoom, 1, 1),
+                      child: buildCoverImageStack(
+                        file: widget.file,
+                        imageWidth: widget.imageWidth,
+                        imageHeight: widget.imageHeight,
+                        offsetX: _x,
+                        offsetY: _y,
+                        zoom: _zoom,
+                        imageGeneration: widget.imageGeneration,
+                        size: size,
+                        // Cap cacheWidth at moderate zoom — avoids a huge
+                        // decode at vz=4 while staying sharp through 2×.
+                        cacheWidthMultiplier: 4.0,
+                        overlay: IgnorePointer(
+                          child: CustomPaint(
+                            size: size,
+                            painter: _SafeAreaOverlayPainter(
+                              layout: widget.layout,
+                              showOverlay: widget.showOverlay,
+                              centerSnapX: _centerSnapX,
+                              centerSnapY: _centerSnapY,
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
-          ),
+            Positioned(top: 6, right: 6, child: _CanvasHelpButton()),
+            const Positioned(left: 6, bottom: 6, child: _ControlsHud()),
+          ],
         );
       },
+    );
+  }
+}
+
+/// Paints two overlays on the cropper canvas, both anchored to the
+/// 1024×2048 bg-texture coordinate system:
+///
+/// 1. Red diagonal-hatched bands over the four hidden zones (top, bottom,
+///    left, right) — port of `_draw_hidden_overlays_on_image`
+///    (RR_VHS_Tool.py:12471-12530).
+/// 2. A cyan dashed border around the visible rectangle — port of
+///    `_draw_safe_border_on_canvas` (RR_VHS_Tool.py:12532-12580).
+///
+/// When the slot's layout is 1..5 we use [layoutVisibleRect]; otherwise we
+/// fall back to the layout-agnostic [kHiddenTop]/[kHiddenBottom]/
+/// [kHiddenLeft]/[kHiddenRight] bands the Python tool uses pre-layout
+/// (RR_VHS_Tool.py:11221-11225).
+class _SafeAreaOverlayPainter extends CustomPainter {
+  final int layout;
+  final bool showOverlay;
+  final bool centerSnapX;
+  final bool centerSnapY;
+  const _SafeAreaOverlayPainter({
+    required this.layout,
+    this.showOverlay = false,
+    this.centerSnapX = false,
+    this.centerSnapY = false,
+  });
+
+  // Match Python's hatch palette (RR_VHS_Tool.py:12462-12467, 12525).
+  static const Color _hatchFill = Color(0x2D3B0000);   // (59,0,0,45)
+  static const Color _hatchLine = Color(0x50C81E1E);   // (200,30,30,80)
+  static const Color _hatchEdge = Color(0x78C81E1E);   // (200,30,30,120)
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+    final scale = size.width / kTextureBkgWidth;
+
+    // Visible rect in bg-texture coords, with a per-layout fallback to the
+    // global hidden-band constants when no valid layout is selected.
+    final double visTop, visBot, visLeft, visRight;
+    final r = layoutVisibleRect(layout);
+    if (r != null) {
+      visTop = r.top;
+      visBot = r.bottom;
+      visLeft = r.left;
+      visRight = r.right;
+    } else {
+      visTop = kHiddenTop.toDouble();
+      visBot = (kTextureBkgHeight - kHiddenBottom).toDouble();
+      visLeft = kHiddenLeft.toDouble();
+      visRight = (kTextureBkgWidth - kHiddenRight).toDouble();
+    }
+
+    final dvTop = (visTop * scale).clamp(0.0, size.height);
+    final dvBot = (visBot * scale).clamp(0.0, size.height);
+    final dvLeft = (visLeft * scale).clamp(0.0, size.width);
+    final dvRight = (visRight * scale).clamp(0.0, size.width);
+
+    final borderRect = Rect.fromLTRB(dvLeft, dvTop, dvRight, dvBot);
+
+    // Zones + cyan border are gated by `showOverlay` (LAYOUT OVERLAY pill).
+    // The snap-centre guide lines below are NOT — they fire on snap-to-
+    // centre regardless of overlay visibility, matching Pythons
+    // `_show_snap_guides` which paints them as separate canvas items
+    // (RR_VHS_Tool.py:11450-11502).
+    if (showOverlay) {
+      // Hidden zones — paint each non-empty band.
+      final zones = <Rect>[
+        if (dvTop > 0) Rect.fromLTRB(0, 0, size.width, dvTop),
+        if (dvBot < size.height)
+          Rect.fromLTRB(0, dvBot, size.width, size.height),
+        if (dvLeft > 0) Rect.fromLTRB(0, 0, dvLeft, size.height),
+        if (dvRight < size.width)
+          Rect.fromLTRB(dvRight, 0, size.width, size.height),
+      ];
+      for (final z in zones) {
+        _paintHatchedZone(canvas, z);
+      }
+
+      // Cyan dashed visible-area border (1px, dash 6,3 — matches Python).
+      if (borderRect.width > 0 && borderRect.height > 0) {
+        _paintDashedRect(canvas, borderRect);
+      }
+    }
+
+    // Centre-axis snap guides — only while the user is dragging and the
+    // offset hits the safe-centre target.  Pythons `_show_snap_guides`
+    // (RR_VHS_Tool.py:11450-11502) draws cyan dashed lines spanning the
+    // safe area in the appropriate direction.
+    if (centerSnapX && borderRect.width > 0) {
+      final cx = (borderRect.left + borderRect.right) / 2;
+      _paintDashedLine(
+        canvas,
+        Offset(cx, borderRect.top),
+        Offset(cx, borderRect.bottom),
+      );
+    }
+    if (centerSnapY && borderRect.height > 0) {
+      final cy = (borderRect.top + borderRect.bottom) / 2;
+      _paintDashedLine(
+        canvas,
+        Offset(borderRect.left, cy),
+        Offset(borderRect.right, cy),
+      );
+    }
+  }
+
+  void _paintDashedLine(Canvas canvas, Offset a, Offset b) {
+    final paint = Paint()
+      ..color = kColorCyan
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    const dash = 4.0;
+    const gap = 3.0;
+    final dx = b.dx - a.dx;
+    final dy = b.dy - a.dy;
+    final length = (dx * dx + dy * dy).abs();
+    if (length == 0) return;
+    final ux = dx / (b - a).distance;
+    final uy = dy / (b - a).distance;
+    var t = 0.0;
+    final total = (b - a).distance;
+    while (t < total) {
+      final t2 = (t + dash).clamp(0.0, total);
+      canvas.drawLine(
+        Offset(a.dx + ux * t, a.dy + uy * t),
+        Offset(a.dx + ux * t2, a.dy + uy * t2),
+        paint,
+      );
+      t += dash + gap;
+    }
+  }
+
+  void _paintHatchedZone(Canvas canvas, Rect rect) {
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    canvas.save();
+    canvas.clipRect(rect);
+
+    // Base fill — matches the dark-red tile fill in Python's hatch tile.
+    canvas.drawRect(rect, Paint()..color = _hatchFill);
+
+    // Diagonal hatch lines, every 8 px (Python builds three diagonals per
+    // 16×16 tile at offsets 0/-8/+8 → effectively a line every 8 px).
+    final linePaint = Paint()
+      ..color = _hatchLine
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    const step = 8.0;
+    final h = rect.height;
+    // x ranges from rect.left - h (lines going off the left) up to
+    // rect.right (last line ending at top-right corner).
+    var x = rect.left - h;
+    while (x <= rect.right) {
+      canvas.drawLine(
+        Offset(x, rect.top),
+        Offset(x + h, rect.bottom),
+        linePaint,
+      );
+      x += step;
+    }
+
+    canvas.restore();
+
+    // Bright red 1-px outline around the zone.
+    canvas.drawRect(
+      rect.deflate(0.5),
+      Paint()
+        ..color = _hatchEdge
+        ..strokeWidth = 1
+        ..style = PaintingStyle.stroke,
+    );
+  }
+
+  void _paintDashedRect(Canvas canvas, Rect rect) {
+    final paint = Paint()
+      ..color = kColorCyan
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    const dash = 6.0;
+    const gap = 3.0;
+
+    // Horizontal edges (top + bottom).
+    void hEdge(double y) {
+      var x = rect.left;
+      while (x < rect.right) {
+        final end = (x + dash).clamp(rect.left, rect.right);
+        canvas.drawLine(Offset(x, y), Offset(end, y), paint);
+        x += dash + gap;
+      }
+    }
+
+    // Vertical edges (left + right).
+    void vEdge(double x) {
+      var y = rect.top;
+      while (y < rect.bottom) {
+        final end = (y + dash).clamp(rect.top, rect.bottom);
+        canvas.drawLine(Offset(x, y), Offset(x, end), paint);
+        y += dash + gap;
+      }
+    }
+
+    hEdge(rect.top);
+    hEdge(rect.bottom);
+    vEdge(rect.left);
+    vEdge(rect.right);
+  }
+
+  @override
+  bool shouldRepaint(_SafeAreaOverlayPainter old) =>
+      old.layout != layout ||
+      old.showOverlay != showOverlay ||
+      old.centerSnapX != centerSnapX ||
+      old.centerSnapY != centerSnapY;
+}
+
+/// Bottom-left HUD overlay listing the cropper's mouse bindings + a
+/// snap-to-guides toggle (RR_VHS_Tool.py:12327-12424).  Minimisable to a
+/// single ⚙ icon to keep out of the way for users who already know the
+/// controls.  HUD-minimised state is local — it doesn't persist across
+/// app restarts (matches Python).
+class _ControlsHud extends ConsumerStatefulWidget {
+  const _ControlsHud();
+
+  @override
+  ConsumerState<_ControlsHud> createState() => _ControlsHudState();
+}
+
+class _ControlsHudState extends ConsumerState<_ControlsHud> {
+  bool _minimized = false;
+
+  // Pythons HUD palette — kept as locals so this stays self-contained.
+  static const Color _hudBg = Color(0xFF0B1218);
+  static const Color _hudBorder = Color(0xFF004D55);
+
+  @override
+  Widget build(BuildContext context) {
+    final snapOn = ref.watch(snapEnabledProvider);
+
+    if (_minimized) {
+      return _HudIconButton(
+        glyph: '⚙',
+        onTap: () => setState(() => _minimized = false),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _hudBg,
+        border: Border.all(color: _hudBorder),
+      ),
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'CONTROLS',
+                style: TextStyle(
+                  fontSize: kFsMeta,
+                  fontWeight: FontWeight.w700,
+                  color: kColorText3,
+                  letterSpacing: 1.5,
+                ),
+              ),
+              const SizedBox(width: kSp4),
+              _HudMinButton(
+                glyph: '−',
+                onTap: () => setState(() => _minimized = true),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Divider(height: 1, color: kColorBorder),
+          const SizedBox(height: 4),
+          const _HudKeyRow(key_: 'Scroll', value: 'Zoom'),
+          const _HudKeyRow(key_: 'Middle drag', value: 'Pan viewport'),
+          const _HudKeyRow(key_: 'Left drag', value: 'Move image'),
+          const SizedBox(height: 4),
+          const Divider(height: 1, color: kColorBorder),
+          const SizedBox(height: 4),
+          _HudSnapToggle(
+            on: snapOn,
+            onTap: () =>
+                ref.read(snapEnabledProvider.notifier).state = !snapOn,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HudKeyRow extends StatelessWidget {
+  final String key_;
+  final String value;
+  const _HudKeyRow({required this.key_, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 78,
+            child: Text(
+              key_,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontSize: kFsMeta,
+                fontWeight: FontWeight.w700,
+                color: kColorText2,
+              ),
+            ),
+          ),
+          const SizedBox(width: kSp2),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: kFsMeta,
+              color: kColorText3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HudSnapToggle extends StatefulWidget {
+  final bool on;
+  final VoidCallback onTap;
+  const _HudSnapToggle({required this.on, required this.onTap});
+
+  @override
+  State<_HudSnapToggle> createState() => _HudSnapToggleState();
+}
+
+class _HudSnapToggleState extends State<_HudSnapToggle> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final boxBorder = widget.on ? kColorCyan : kColorBorder;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 11,
+              height: 11,
+              decoration: BoxDecoration(
+                color: kColorSurface,
+                border: Border.all(color: boxBorder),
+              ),
+              child: widget.on
+                  ? const Icon(Icons.check, size: 9, color: kColorCyan)
+                  : null,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'Snap to guides',
+              style: TextStyle(
+                fontSize: kFsMeta,
+                color: widget.on
+                    ? (_hover ? kColorText : kColorText2)
+                    : kColorText3,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HudIconButton extends StatefulWidget {
+  final String glyph;
+  final VoidCallback onTap;
+  const _HudIconButton({required this.glyph, required this.onTap});
+
+  @override
+  State<_HudIconButton> createState() => _HudIconButtonState();
+}
+
+class _HudIconButtonState extends State<_HudIconButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          width: 24,
+          height: 24,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: kColorPanel.withValues(alpha: 0.85),
+            shape: BoxShape.circle,
+            border: Border.all(color: kColorBorder),
+          ),
+          child: Text(
+            widget.glyph,
+            style: TextStyle(
+              fontSize: kFsMeta,
+              fontWeight: FontWeight.w700,
+              color: _hover ? kColorText : kColorText2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HudMinButton extends StatefulWidget {
+  final String glyph;
+  final VoidCallback onTap;
+  const _HudMinButton({required this.glyph, required this.onTap});
+
+  @override
+  State<_HudMinButton> createState() => _HudMinButtonState();
+}
+
+class _HudMinButtonState extends State<_HudMinButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Text(
+            widget.glyph,
+            style: TextStyle(
+              fontSize: kFsBody,
+              fontWeight: FontWeight.w700,
+              color: _hover ? kColorText : kColorText3,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Small circular "?" button anchored to the cropper's top-right corner.
+/// Click opens the canvas-guide dialog (RR_VHS_Tool.py:11685-11695,
+/// 12318-12325).  Pythons ? button is drawn directly on the Tk canvas
+/// alongside the HUD; in Flutter the cropper Stack is the natural home.
+class _CanvasHelpButton extends StatefulWidget {
+  @override
+  State<_CanvasHelpButton> createState() => _CanvasHelpButtonState();
+}
+
+class _CanvasHelpButtonState extends State<_CanvasHelpButton> {
+  bool _hover = false;
+
+  void _showHelp(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Canvas Guide'),
+        content: const SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Red hatched areas — hidden in-game',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'These regions are covered by the VHS tape model. '
+                'Your artwork here will not be visible to players.',
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Cyan dashed border — visible area',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Only content inside this border shows on the tape.',
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Tip: use Fit Visible to fill the visible area.',
+                style: TextStyle(color: kColorCyan),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = _hover ? kColorText : kColorText2;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: () => _showHelp(context),
+        child: Container(
+          width: 22,
+          height: 22,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: kColorPanel.withValues(alpha: 0.85),
+            shape: BoxShape.circle,
+            border: Border.all(color: kColorBorder),
+          ),
+          child: Text(
+            '?',
+            style: TextStyle(
+              fontSize: kFsMeta,
+              fontWeight: FontWeight.w700,
+              color: fg,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -9,6 +9,7 @@ import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
 import 'add_slot_dialog.dart';
+import 'cover_image.dart';
 
 /// Shelf of custom slot cards for the active tab (left column of the
 /// 3-column main layout — mirrors Python's "shelf" panel
@@ -258,9 +259,9 @@ class _SlotCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: AspectRatio(
-                aspectRatio: 1024 / 2048,
-                child: _Thumbnail(replacement: replacement),
+              child: _Thumbnail(
+                replacement: replacement,
+                layout: slot.ls,
               ),
             ),
             Container(
@@ -309,37 +310,99 @@ class _SlotCard extends StatelessWidget {
   }
 }
 
-class _Thumbnail extends StatelessWidget {
+class _Thumbnail extends ConsumerWidget {
   final TextureReplacement? replacement;
+  final int layout;
 
-  const _Thumbnail({this.replacement});
+  const _Thumbnail({this.replacement, required this.layout});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final r = replacement;
+    // Aspect of this slot's visible / cyan area — what the user actually
+    // sees in-game.  Falls back to layout 1's rect for random/0 layouts
+    // (we don't know which layout the game will pick at runtime).
+    final visRect = layoutVisibleRectInt(layout < 1 || layout > 5 ? 1 : layout);
+    final visAspect = visRect.width / visRect.height;
+
+    Widget body;
     if (r == null) {
-      return const _Placeholder(
+      body = const _Placeholder(
         label: 'NO IMAGE',
         sublabel: 'will render black in-game',
       );
+    } else {
+      final file = File(r.path);
+      if (!file.existsSync()) {
+        body = _Placeholder(
+          label: 'IMAGE MISSING',
+          sublabel: r.path,
+          isError: true,
+        );
+      } else {
+        body = _ThumbnailImage(
+          file: file,
+          replacement: r,
+          viewport: visRect,
+        );
+      }
     }
-    final file = File(r.path);
-    if (!file.existsSync()) {
-      return _Placeholder(
-        label: 'IMAGE MISSING',
-        sublabel: r.path,
-        isError: true,
-      );
-    }
-    return Image.file(
-      file,
-      fit: BoxFit.cover,
-      cacheWidth: 360,
-      errorBuilder: (context, error, stack) => _Placeholder(
+    return Center(
+      child: AspectRatio(aspectRatio: visAspect, child: body),
+    );
+  }
+}
+
+class _ThumbnailImage extends ConsumerWidget {
+  final File file;
+  final TextureReplacement replacement;
+  final Rect viewport;
+
+  const _ThumbnailImage({
+    required this.file,
+    required this.replacement,
+    required this.viewport,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final imageGen = ref.watch(coverImageGenerationProvider(file.path));
+    final dimsAsync = ref.watch(imageDimensionsProvider(file.path));
+    return dimsAsync.when(
+      loading: () => Container(color: kColorBg),
+      error: (_, _) => const _Placeholder(
         label: 'DECODE ERROR',
-        sublabel: r.path,
+        sublabel: '',
         isError: true,
       ),
+      data: (dims) {
+        if (dims == null) {
+          return _Placeholder(
+            label: 'IMAGE MISSING',
+            sublabel: file.path,
+            isError: true,
+          );
+        }
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            return buildCoverImageStack(
+              file: file,
+              imageWidth: dims.w,
+              imageHeight: dims.h,
+              offsetX: replacement.offsetX,
+              offsetY: replacement.offsetY,
+              zoom: replacement.zoom,
+              imageGeneration: imageGen,
+              size: Size(constraints.maxWidth, constraints.maxHeight),
+              viewport: viewport,
+              // Thumbnails can't be zoomed, so a small hi-DPI margin is
+              // plenty.  Drops decode pixel count by ~7× vs. the cropper's
+              // 4× headroom (4²/1.5² ≈ 7).
+              cacheWidthMultiplier: 1.5,
+            );
+          },
+        );
+      },
     );
   }
 }

@@ -6,8 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
+import '../../data/services/cover_actions.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
+import 'crop_editor_bar.dart';
 import 'cropping_preview.dart';
 import 'layout_style_picker.dart';
 
@@ -49,20 +51,21 @@ class SlotPreview extends ConsumerWidget {
       child: Column(
         children: [
           Expanded(
-            child: Center(
-              child: AspectRatio(
-                aspectRatio: 1024 / 2048,
-                child: _PreviewFrame(
-                  bkgTex: slot.bkgTex,
-                  replacement: repl,
-                ),
-              ),
-            ),
+            child: repl == null
+                ? Center(
+                    child: AspectRatio(
+                      aspectRatio: 1024 / 2048,
+                      child: _UploadPicker(bkgTex: slot.bkgTex),
+                    ),
+                  )
+                : _CoverEditorBlock(
+                    // Reset transient state on slot change.
+                    key: ValueKey(slot.bkgTex),
+                    bkgTex: slot.bkgTex,
+                    layout: slot.ls,
+                    replacement: repl,
+                  ),
           ),
-          if (repl != null) ...[
-            const SizedBox(height: kSp1),
-            _CropperStatus(bkgTex: slot.bkgTex, replacement: repl),
-          ],
           const SizedBox(height: kSp2),
           Text(
             slot.pnName.isEmpty ? '(untitled)' : slot.pnName,
@@ -80,7 +83,7 @@ class SlotPreview extends ConsumerWidget {
             style: const TextStyle(fontSize: kFsMeta, color: kColorText3),
           ),
           const SizedBox(height: kSp3),
-          LayoutStylePicker(
+          LayoutSection(
             value: slot.ls.clamp(1, 5),
             onChanged: (v) async {
               if (v == slot.ls) return;
@@ -104,27 +107,18 @@ class SlotPreview extends ConsumerWidget {
   }
 }
 
-/// Cover-image frame.  Two distinct modes:
-///
-///   * **No image yet** — single-click opens a file picker (matches the
-///     "click to upload" affordance from the read-only era).  This is the
-///     same code path the right-rail UPLOAD button uses.
-///
-///   * **Image set** — frame becomes a [CroppingPreview]: drag to pan,
-///     mouse-wheel to zoom.  Replacement now goes through the right-rail
-///     REPLACE button only (matches Python — RR_VHS_Tool.py:11104+ uses
-///     the canvas exclusively for cropping, never for re-pick).
-class _PreviewFrame extends ConsumerStatefulWidget {
+/// Click-to-upload placeholder shown when the slot has no image yet.
+/// Single-click opens a file picker — same code path as the right-rail
+/// UPLOAD button.
+class _UploadPicker extends ConsumerStatefulWidget {
   final String bkgTex;
-  final TextureReplacement? replacement;
-
-  const _PreviewFrame({required this.bkgTex, this.replacement});
+  const _UploadPicker({required this.bkgTex});
 
   @override
-  ConsumerState<_PreviewFrame> createState() => _PreviewFrameState();
+  ConsumerState<_UploadPicker> createState() => _UploadPickerState();
 }
 
-class _PreviewFrameState extends ConsumerState<_PreviewFrame> {
+class _UploadPickerState extends ConsumerState<_UploadPicker> {
   bool _busy = false;
 
   Future<void> _pick() async {
@@ -149,52 +143,302 @@ class _PreviewFrameState extends ConsumerState<_PreviewFrame> {
 
   @override
   Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: _busy ? null : _pick,
+        child: Container(
+          decoration: BoxDecoration(
+            color: kColorPanel,
+            border: Border.all(color: kColorBorder),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: const _PreviewPlaceholder(
+            label: 'CLICK TO UPLOAD',
+            sublabel: 'PNG · JPG · WEBP · BMP',
+            icon: Icons.upload_file_outlined,
+            accent: kColorPink,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Cover preview + editor controls + status, sharing transient state so
+/// the slider/buttons can drive a live preview without a per-tick disk write.
+///
+/// State held here:
+///   * `_ovX` / `_ovY` / `_ovZoom` — transient overrides while the slider is
+///     being dragged.  Cleared on commit.
+///   * `_imageGen` — bumped after `↻ Rotate` rewrites the file in place, so
+///     the underlying `Image.file` is rebuilt against the new bytes instead
+///     of the cached pre-rotation pixels.
+class _CoverEditorBlock extends ConsumerStatefulWidget {
+  final String bkgTex;
+  final int layout;
+  final TextureReplacement replacement;
+
+  const _CoverEditorBlock({
+    super.key,
+    required this.bkgTex,
+    required this.layout,
+    required this.replacement,
+  });
+
+  @override
+  ConsumerState<_CoverEditorBlock> createState() => _CoverEditorBlockState();
+}
+
+class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
+  int? _ovX;
+  int? _ovY;
+  double? _ovZoom;
+  bool _rotating = false;
+  bool _fitting = false;
+
+  int get _x => _ovX ?? widget.replacement.offsetX;
+  int get _y => _ovY ?? widget.replacement.offsetY;
+  double get _zoom => _ovZoom ?? widget.replacement.zoom;
+
+  @override
+  void didUpdateWidget(covariant _CoverEditorBlock old) {
+    super.didUpdateWidget(old);
+    // When the saved values change (e.g. after a setTransform commit) drop
+    // any leftover overrides so the UI reflects what's on disk.
+    final r = widget.replacement;
+    final or = old.replacement;
+    if (r.offsetX != or.offsetX ||
+        r.offsetY != or.offsetY ||
+        r.zoom != or.zoom) {
+      _ovX = null;
+      _ovY = null;
+      _ovZoom = null;
+    }
+  }
+
+  Future<void> _commitTransform({
+    required int offsetX,
+    required int offsetY,
+    required double zoom,
+  }) async {
+    await ref.read(replacementsControllerProvider).setTransform(
+          widget.bkgTex,
+          offsetX: offsetX,
+          offsetY: offsetY,
+          zoom: zoom,
+        );
+  }
+
+  void _onCropperPreview(int x, int y, double z) {
+    setState(() {
+      _ovX = x;
+      _ovY = y;
+      _ovZoom = z;
+    });
+  }
+
+  // Don't clear overrides eagerly — the cropper would briefly fall back to
+  // `repl.offsetX/Y/zoom` (the pre-commit values) during the async disk
+  // write, flashing the cover back to its old position.  didUpdateWidget
+  // clears them once the new replacement lands.
+  Future<void> _onCropperCommit(int x, int y, double z) async {
+    setState(() {
+      _ovX = x;
+      _ovY = y;
+      _ovZoom = z;
+    });
+    await _commitTransform(offsetX: x, offsetY: y, zoom: z);
+  }
+
+  void _onZoomPreview(double z) {
+    setState(() => _ovZoom = z);
+  }
+
+  Future<void> _onZoomCommit(double z) async {
+    setState(() => _ovZoom = z);
+    await _commitTransform(offsetX: _x, offsetY: _y, zoom: z);
+  }
+
+  Future<void> _rotate() async {
+    if (_rotating) return;
+    final file = File(widget.replacement.path);
+    if (!file.existsSync()) {
+      _showError('Image file is missing — re-upload to enable rotate.');
+      return;
+    }
+    setState(() => _rotating = true);
+    try {
+      await rotateCoverImageCw(file.path);
+      // `Image.file(..., cacheWidth: …)` wraps the FileImage in a
+      // ResizeImage with its own cache key, so FileImage.evict() alone
+      // wouldn't catch the variants the cropper and the thumbnails use
+      // (different cacheWidths).  Clearing the whole image cache is the
+      // simple correct thing — rotate is rare.
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+      if (!mounted) return;
+      // Bump the global generation: forces every Image.file key to remount
+      // and re-invalidates imageDimensionsProvider so the swapped (h, w)
+      // dims get picked up.
+      ref
+          .read(coverImageGenerationProvider(file.path).notifier)
+          .state += 1;
+      // Auto-Fit-Visible against the new orientation: a portrait→landscape
+      // rotate at the old transform would otherwise show a tall slice of
+      // the new wide image, which is what users hit as "rotation looks
+      // wrong" before this got wired up.
+      final dims =
+          await ref.read(imageDimensionsProvider(file.path).future);
+      if (!mounted) return;
+      if (dims != null) {
+        final t = computeFitVisibleTransform(
+          imageWidth: dims.w,
+          imageHeight: dims.h,
+          layout: widget.layout,
+        );
+        if (t != null) {
+          await _commitTransform(
+            offsetX: t.offsetX,
+            offsetY: t.offsetY,
+            zoom: t.zoom,
+          );
+        }
+      }
+      if (mounted) setState(() => _rotating = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _rotating = false);
+      _showError('Rotate failed: $e');
+    }
+  }
+
+  Future<void> _fillCanvas() async {
+    await _commitTransform(
+      offsetX: kFillCanvasTransform.offsetX,
+      offsetY: kFillCanvasTransform.offsetY,
+      zoom: kFillCanvasTransform.zoom,
+    );
+  }
+
+  Future<void> _fitVisible() async {
+    if (_fitting) return;
+    setState(() => _fitting = true);
+    try {
+      final dims = await ref
+          .read(imageDimensionsProvider(widget.replacement.path).future);
+      if (dims == null) {
+        if (mounted) _showError('Could not read image dimensions.');
+        return;
+      }
+      final t = computeFitVisibleTransform(
+        imageWidth: dims.w,
+        imageHeight: dims.h,
+        layout: widget.layout,
+      );
+      if (t == null) return;
+      await _commitTransform(
+        offsetX: t.offsetX,
+        offsetY: t.offsetY,
+        zoom: t.zoom,
+      );
+    } finally {
+      if (mounted) setState(() => _fitting = false);
+    }
+  }
+
+  void _showError(String msg) {
+    final m = ScaffoldMessenger.maybeOf(context);
+    m?.showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final repl = widget.replacement;
+    final imageGen = ref.watch(coverImageGenerationProvider(repl.path));
+    final dimsAsync = ref.watch(imageDimensionsProvider(repl.path));
+    final snapOn = ref.watch(snapEnabledProvider);
+    final overlayOn = ref.watch(layoutOverlayProvider);
     final frameDeco = BoxDecoration(
       color: kColorPanel,
       border: Border.all(color: kColorBorder),
     );
 
-    if (repl == null) {
-      return MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: _busy ? null : _pick,
-          child: Container(
-            decoration: frameDeco,
-            clipBehavior: Clip.antiAlias,
-            child: const _PreviewPlaceholder(
-              label: 'CLICK TO UPLOAD',
-              sublabel: 'PNG · JPG · WEBP · BMP',
-              icon: Icons.upload_file_outlined,
-              accent: kColorPink,
-            ),
-          ),
+    Widget cropperOrPlaceholder() {
+      return dimsAsync.when(
+        loading: () => const _PreviewPlaceholder(
+          label: 'LOADING…',
+          sublabel: 'reading image dimensions',
+          icon: Icons.hourglass_empty,
         ),
+        error: (e, _) => _PreviewPlaceholder(
+          label: 'DECODE ERROR',
+          sublabel: '$e',
+          isError: true,
+        ),
+        data: (dims) {
+          if (dims == null) {
+            return _PreviewPlaceholder(
+              label: 'IMAGE MISSING',
+              sublabel: repl.path,
+              isError: true,
+            );
+          }
+          return CroppingPreview(
+            file: File(repl.path),
+            savedOffsetX: _x,
+            savedOffsetY: _y,
+            savedZoom: _zoom,
+            layout: widget.layout,
+            imageWidth: dims.w,
+            imageHeight: dims.h,
+            imageGeneration: imageGen,
+            snapEnabled: snapOn,
+            showOverlay: overlayOn,
+            onPreview: _onCropperPreview,
+            onCommit: _onCropperCommit,
+            onMissing: (_) => _PreviewPlaceholder(
+              label: 'IMAGE MISSING',
+              sublabel: repl.path,
+              isError: true,
+            ),
+          );
+        },
       );
     }
 
-    return Container(
-      decoration: frameDeco,
-      clipBehavior: Clip.antiAlias,
-      child: CroppingPreview(
-        file: File(repl.path),
-        savedOffsetX: repl.offsetX,
-        savedOffsetY: repl.offsetY,
-        savedZoom: repl.zoom,
-        onCommit: (x, y, z) =>
-            ref.read(replacementsControllerProvider).setTransform(
-                  widget.bkgTex,
-                  offsetX: x,
-                  offsetY: y,
-                  zoom: z,
-                ),
-        onMissing: (_) => _PreviewPlaceholder(
-          label: 'IMAGE MISSING',
-          sublabel: repl.path,
-          isError: true,
+    return Column(
+      children: [
+        Expanded(
+          child: Center(
+            child: AspectRatio(
+              aspectRatio: 1024 / 2048,
+              child: Container(
+                decoration: frameDeco,
+                clipBehavior: Clip.antiAlias,
+                child: cropperOrPlaceholder(),
+              ),
+            ),
+          ),
         ),
-      ),
+        const SizedBox(height: kSp2),
+        CropEditorBar(
+          zoom: _zoom,
+          enabled: true,
+          onZoomPreview: _onZoomPreview,
+          onZoomCommit: _onZoomCommit,
+          onRotate: _rotating ? null : _rotate,
+          onFillCanvas: _fillCanvas,
+          onFitVisible: _fitting ? null : _fitVisible,
+        ),
+        const SizedBox(height: kSp1),
+        _CropperStatus(
+          bkgTex: widget.bkgTex,
+          offsetX: _x,
+          offsetY: _y,
+          zoom: _zoom,
+        ),
+      ],
     );
   }
 }
@@ -204,9 +448,16 @@ class _PreviewFrameState extends ConsumerState<_PreviewFrame> {
 /// and 11515-11530).
 class _CropperStatus extends ConsumerStatefulWidget {
   final String bkgTex;
-  final TextureReplacement replacement;
+  final int offsetX;
+  final int offsetY;
+  final double zoom;
 
-  const _CropperStatus({required this.bkgTex, required this.replacement});
+  const _CropperStatus({
+    required this.bkgTex,
+    required this.offsetX,
+    required this.offsetY,
+    required this.zoom,
+  });
 
   @override
   ConsumerState<_CropperStatus> createState() => _CropperStatusState();
@@ -216,9 +467,7 @@ class _CropperStatusState extends ConsumerState<_CropperStatus> {
   bool _resetHover = false;
 
   bool get _isDefault =>
-      widget.replacement.offsetX == 0 &&
-      widget.replacement.offsetY == 0 &&
-      widget.replacement.zoom == 1.0;
+      widget.offsetX == 0 && widget.offsetY == 0 && widget.zoom == 1.0;
 
   Future<void> _reset() async {
     await ref.read(replacementsControllerProvider).setTransform(
@@ -231,9 +480,8 @@ class _CropperStatusState extends ConsumerState<_CropperStatus> {
 
   @override
   Widget build(BuildContext context) {
-    final r = widget.replacement;
     final readout =
-        'offset ${r.offsetX}, ${r.offsetY}  ·  zoom ${r.zoom.toStringAsFixed(2)}x';
+        'offset ${widget.offsetX}, ${widget.offsetY}  ·  zoom ${widget.zoom.toStringAsFixed(2)}x';
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [

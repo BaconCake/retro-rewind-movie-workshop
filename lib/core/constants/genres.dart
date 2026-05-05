@@ -43,6 +43,127 @@ const int kTextureSubHeight = 512;
 const int kTextureBkgWidth = 1024;
 const int kTextureBkgHeight = 2048;
 
+// ── Safe zone / hidden bands (RR_VHS_Tool.py:567-617) ───────────────────
+//
+// Calibrated against in-game rendering — these define the bands of the
+// 1024×2048 background texture that are *not* visible behind the VHS-tape
+// model.  Used as a fallback when no layout is selected; for the per-layout
+// case, see [layoutVisibleRect] below.
+const int kSafeY1 = 35;
+const int kSafeW = 993;
+const int kSafeH = 2032;
+const int kShiftX = 19;
+const int kHiddenTop = 35;
+const int kHiddenBottom = 448;
+const int kHiddenLeft = 34;
+const int kHiddenRight = 0;
+
+/// Per-layout visible-window calibration (RR_VHS_Tool.py:609-615).
+///
+/// `fit_top` is the y-coordinate in the bg texture (1024×2048) where the
+/// layout window's top edge sits.  `fit_bottom_hidden` is the number of
+/// pixels from the bottom of the texture that are hidden below the layout
+/// window's bottom edge.  Window-bottom = [kTextureBkgHeight] − fit_bottom_hidden.
+class LayoutFit {
+  final int fitTop;
+  final int fitBottomHidden;
+  const LayoutFit({required this.fitTop, required this.fitBottomHidden});
+}
+
+const Map<int, LayoutFit> kLayoutFit = {
+  1: LayoutFit(fitTop: 30, fitBottomHidden: 426),
+  2: LayoutFit(fitTop: 30, fitBottomHidden: 418),
+  3: LayoutFit(fitTop: 31, fitBottomHidden: 417),
+  4: LayoutFit(fitTop:  0, fitBottomHidden: 425),
+  5: LayoutFit(fitTop: 30, fitBottomHidden: 426),
+};
+
+/// Layout-window boundaries inside the 2048×2048 layout BC texture, in
+/// **layout pixels** (RR_VHS_Tool.py:621-627).  These are the edges of the
+/// black "window" through which the cover art shows on the VHS box.
+class LayoutWindow {
+  final int top;
+  final int bottom;
+  final int left;
+  final int right;
+  const LayoutWindow({
+    required this.top,
+    required this.bottom,
+    required this.left,
+    required this.right,
+  });
+}
+
+const Map<int, LayoutWindow> kLayoutWindows = {
+  1: LayoutWindow(top:  99, bottom: 1378, left: 113, right: 1353),
+  2: LayoutWindow(top: 328, bottom: 1607, left: 113, right:  910),
+  3: LayoutWindow(top: 328, bottom: 1607, left: 113, right:  910),
+  4: LayoutWindow(top:  47, bottom: 1403, left:  86, right:  938),
+  5: LayoutWindow(top:  99, bottom: 1378, left: 113, right: 1292),
+};
+
+/// Per-layout overlay nudge (preview-only fine-tuning), in bg-texture
+/// pixels (RR_VHS_Tool.py:631-632).  Tuned against in-game screenshots.
+const Map<int, int> kLayoutOvlNudgeY = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0};
+const Map<int, int> kLayoutOvlNudgeX = {1: -3, 2: -3, 3: -3, 4: 0, 5: -3};
+
+/// Visible rectangle in bg-texture coordinates (top, bottom, left, right)
+/// for a given layout (1..5).  Returns null for invalid layouts.
+///
+/// Pure port of `get_layout_visible_rect()` (RR_VHS_Tool.py:634-665) —
+/// tested for parity in `test/layout_visible_rect_test.dart`.
+class LayoutVisibleRect {
+  final double top;
+  final double bottom;
+  final double left;
+  final double right;
+  const LayoutVisibleRect({
+    required this.top,
+    required this.bottom,
+    required this.left,
+    required this.right,
+  });
+}
+
+LayoutVisibleRect? layoutVisibleRect(int layoutN) {
+  if (layoutN < 1 || layoutN > 5) return null;
+  final lf = kLayoutFit[layoutN]!;
+  final lw = kLayoutWindows[layoutN]!;
+  final bgTop = lf.fitTop.toDouble();
+  final bgBot = (kTextureBkgHeight - lf.fitBottomHidden).toDouble();
+  final lscale = (bgBot - bgTop) / (lw.bottom - lw.top);
+  var loy = bgTop - lw.top * lscale + (kLayoutOvlNudgeY[layoutN] ?? 0);
+
+  // Horizontal alignment: layout 4 aligns left at x=0, others at kHiddenLeft.
+  // Non-wide layouts right-align to kTextureBkgWidth.
+  final windowW = (lw.right - lw.left) * lscale;
+  double lox;
+  if (windowW > kTextureBkgWidth) {
+    final leftAlign = (layoutN == 4) ? 0 : kHiddenLeft;
+    lox = leftAlign - lw.left * lscale;
+  } else {
+    lox = kTextureBkgWidth - lw.right * lscale;
+  }
+  lox += (kLayoutOvlNudgeX[layoutN] ?? 0);
+
+  // Window edges in bg-texture coords, clamped to texture bounds.
+  var visTop = loy + lw.top * lscale;
+  var visBot = loy + lw.bottom * lscale;
+  var visLeft = lox + lw.left * lscale;
+  var visRight = lox + lw.right * lscale;
+  visLeft = visLeft.clamp(0, kTextureBkgWidth).toDouble();
+  visRight = visRight.clamp(0, kTextureBkgWidth).toDouble();
+  visTop = visTop.clamp(0, kTextureBkgHeight).toDouble();
+  visBot = visBot.clamp(0, kTextureBkgHeight).toDouble();
+
+  return LayoutVisibleRect(
+    top: visTop,
+    bottom: visBot,
+    left: visLeft,
+    right: visRight,
+  );
+}
+
 /// Slice 1 build version string emitted in the build log.
 /// Python tool version is v1.8.2; the Flutter port carries its own line
 /// until feature parity (see MIGRATION.md).

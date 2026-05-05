@@ -11,6 +11,7 @@ import '../../data/datatable/slot_data.dart';
 import '../../data/repositories/config_repository_impl.dart';
 import '../../data/repositories/pak_builder_impl.dart';
 import '../../data/repositories/texture_repository_impl.dart';
+import '../../data/services/cover_actions.dart';
 import '../../domain/custom_slot_naming.dart';
 import '../../domain/entities/app_config.dart';
 import '../../domain/entities/texture.dart';
@@ -301,6 +302,59 @@ final selectedTabProvider = StateProvider<String>((_) => 'All Movies');
 /// (e.g. `"T_Bkg_Dra_001"`).  Null when no slot is picked.  Drives the
 /// preview + slot-options panels.
 final selectedSlotBkgProvider = StateProvider<String?>((_) => null);
+
+/// Whether drag-time snapping (centre axes + safe / canvas edges) is
+/// active.  Defaults to true — Pythons `_snap_enabled` does the same
+/// (RR_VHS_Tool.py:11165).  Toggleable from the cropper editor bar.
+final snapEnabledProvider = StateProvider<bool>((_) => true);
+
+/// Whether the layout safe-area overlay (red hatched hidden zones + cyan
+/// dashed visible-area border) is drawn on the cropper canvas.  Defaults
+/// to `false` to match Pythons `_layout_overlay_var` initial state
+/// (RR_VHS_Tool.py:8050).  Toggleable from the LAYOUT OVERLAY pill in the
+/// layout section under the cropper.
+///
+/// Snap targets and centre-axis snap guides are unaffected by this flag —
+/// snap stays active and shows guide lines on snap, regardless of overlay
+/// visibility.  Python likewise draws snap guides as separate canvas
+/// items independent of `_layout_preview` (RR_VHS_Tool.py:11450-11502).
+final layoutOverlayProvider = StateProvider<bool>((_) => false);
+
+/// Per-path counter bumped after a file rewrite (e.g. ↻ Rotate).  Mixed
+/// into `Image.file` keys for that specific path so the stale cached
+/// bytes get replaced — including the `ResizeImage`-wrapped `cacheWidth`
+/// variants the simple `FileImage.evict()` call doesn't reach.
+///
+/// The previous global counter caused every thumbnail in the grid to
+/// remount on rotate, which triggered N parallel disk decodes and N
+/// dimension re-reads — that's where the "thumbnails go black for 2s"
+/// behaviour came from.  Per-path means only the rotated image's widgets
+/// remount; everyone else keeps their `_imageInfo` and stays visible.
+final coverImageGenerationProvider =
+    StateProvider.family<int, String>((ref, path) => 0);
+
+/// Natural pixel dimensions of an image file.  Cached per path; the
+/// renderer needs these to position the image at Python-faithful
+/// canvas-coords (image at `iw*base*zoom × ih*base*zoom`, placed at
+/// `default + offset`) rather than fudging it via cover-fit + scale —
+/// which silently breaks at zoom < 1, leaving padding in the visible area.
+///
+/// Returns null when the file is missing or undecodable; the caller
+/// degrades to a placeholder.  Watches the per-path generation counter
+/// so a rotate of one cover doesn't invalidate dimension lookups for the
+/// other 50 covers in the shelf.
+///
+/// **Not** autoDispose: thumbnails outside the GridView's cacheExtent get
+/// unmounted and would otherwise re-read dims from disk every time the
+/// user scrolls back to them.  Each entry is two ints (~40 bytes) so the
+/// session-long cost of pinning all of them is negligible.
+final imageDimensionsProvider =
+    FutureProvider.family<({int w, int h})?, String>((ref, path) async {
+  ref.watch(coverImageGenerationProvider(path));
+  final result = await readImageDimensions(path);
+  if (result == null) return null;
+  return (w: result.width, h: result.height);
+});
 
 class BuildState {
   final bool isRunning;
