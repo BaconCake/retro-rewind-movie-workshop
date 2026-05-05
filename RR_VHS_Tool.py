@@ -2063,8 +2063,53 @@ def load_nr_slots():
                 _fixed += 1
                 print(f"[NR] Fixed genre_byte for '{nr.get('title','')}' "
                       f"({g}): 0x{old:02X} → 0x{correct_byte:02X}")
-        if _fixed:
+        # Auto-repair legacy modulo bug: the old add_nr_slot() recycled
+        # tex_num modulo base_new_count, so JSONs from previous tool versions
+        # often have multiple slots per genre sharing the same tex_num/bkg_tex.
+        # Keep the FIRST occurrence of each (genre, tex_num); renumber later
+        # duplicates to the next free slot. This preserves user titles/SKUs
+        # and only changes which T_New texture each duplicate references.
+        seen_per_genre = {}  # genre -> set of tex_num kept so far
+        _renumbered = 0
+        for nr in NR_SLOT_DATA:
+            g = nr.get("genre", "")
+            t = nr.get("tex_num", 0)
+            code = nr.get("genre_code") or GENRES.get(g, {}).get("code", "")
+            used = seen_per_genre.setdefault(g, set())
+            if not isinstance(t, int) or t < 1 or t in used:
+                new_t = next(i for i in range(1, 1000) if i not in used)
+                old_t = t
+                nr["tex_num"] = new_t
+                if code:
+                    nr["bkg_tex"] = f"T_New_{code}_{new_t:03d}"
+                used.add(new_t)
+                _renumbered += 1
+                print(f"[NR] Renumbered '{nr.get('title','')}' ({g}): "
+                      f"tex_num {old_t} → {new_t} (bkg_tex={nr.get('bkg_tex','')})")
+            else:
+                used.add(t)
+        # Migrate legacy 2-digit bkg_tex ("T_New_Hor_05") to 3-digit
+        # ("T_New_Hor_005"). 3-digit format bypasses the AssetRegistry
+        # bottleneck — UE resolves 3-digit names via pak filename lookup, so
+        # custom NR slots beyond the base game count actually load in-game.
+        # tex_num itself stays the same int — only the bkg_tex string changes.
+        _migrated_format = 0
+        for nr in NR_SLOT_DATA:
+            code = nr.get("genre_code") or GENRES.get(nr.get("genre", ""), {}).get("code", "")
+            t = nr.get("tex_num", 0)
+            if not code or not isinstance(t, int) or t < 1:
+                continue
+            expected = f"T_New_{code}_{t:03d}"
+            if nr.get("bkg_tex") != expected:
+                nr["bkg_tex"] = expected
+                _migrated_format += 1
+        if _migrated_format:
+            print(f"[NR] Migrated {_migrated_format} bkg_tex entries to 3-digit format")
+        if _fixed or _renumbered or _migrated_format:
             save_nr_slots()
+            if _renumbered:
+                print(f"[NR] Auto-repair: {_renumbered} duplicate tex_num(s) "
+                      f"renumbered (legacy modulo bug). Re-build pak to apply.")
         print(f"[NR] Loaded {len(NR_SLOT_DATA)} new release slot(s)")
 
 def add_nr_slot(genre, title="New Release", standee_shape="A"):
@@ -2073,53 +2118,20 @@ def add_nr_slot(genre, title="New Release", standee_shape="A"):
         print(f"[NR] Genre '{genre}' not supported for New Releases "
               f"(no base game T_New textures)")
         return None
-
-    # Soft cap: 99 NRs per genre. The bkg_tex format "T_New_{code}_{tex_num:02d}"
-    # produces 12-char strings like "T_New_Dra_99". At tex_num=100+, the string
-    # widens to 13 chars ("T_New_Dra_100"), changing the BI FString length in
-    # the DataTable row by 1 byte. That breaks the DataTable's fixed row layout.
-    # 3-digit NR support is feasible but requires wider changes (asset registry,
-    # build pipeline, format strings throughout) — parked for future release.
-    NR_PER_GENRE_CAP = 99
-    existing_count_for_genre = sum(
-        1 for s in NR_SLOT_DATA if s.get("genre") == genre
-    )
-    if existing_count_for_genre >= NR_PER_GENRE_CAP:
-        print(f"[NR] Cannot add NR to '{genre}': already at cap "
-              f"({NR_PER_GENRE_CAP} per genre).")
-        return None
-
     code = GENRES[genre]["code"]
     genre_byte = NR_GENRE_BYTE[genre]
-    base_new_count = GENRES[genre].get("new", 0)
 
-    # Choose tex_num for this NR.
-    # Genres have a fixed number of base game T_New texture slots (1..base_new_count).
-    # When a genre's NR count exceeds that, multiple NRs share a texture slot —
-    # they keep their own SKUs/titles/standees but visually share the same cover.
-    # That's intentional: it's how the tool supports up to 99 NRs per genre even
-    # when the base game only ships e.g. 3 NR slots for Drama.
-    #
-    # Bug fix (v1.8.2): use the smallest UNUSED tex_num within the base range
-    # first. The previous count-based formula `(count % slot_count) + 1` assigned
-    # already-in-use tex_nums after a deletion (e.g. NR #1 at tex_01, NR #2 at
-    # tex_02, delete NR #1, add NR #3 → buggy formula gave tex_02 again,
-    # colliding with the still-existing NR #2). New logic checks what's actually
-    # in use before assigning. Wrapping to share a texture only happens when ALL
-    # base slots are genuinely occupied, matching the genre-change logic at
-    # _change_nr_genre().
-    existing_for_genre = [s for s in NR_SLOT_DATA if s.get("genre") == genre]
-    slot_count = max(base_new_count, 1)
-    used_tex_nums = {s.get("tex_num") for s in existing_for_genre}
-    # Try lowest unused base slot first
-    tex_num = next(
-        (n for n in range(1, slot_count + 1) if n not in used_tex_nums),
-        None,
-    )
-    if tex_num is None:
-        # All base slots in use — share with one of them (cycle by count).
-        tex_num = (len(existing_for_genre) % slot_count) + 1
-    bkg_tex = f"T_New_{code}_{tex_num:02d}"
+    # Assign the smallest unused tex_num for this genre (1, 2, 3, …).
+    # bkg_tex uses 3-digit zero-padded format (T_New_<code>_<NN:03d>) — that
+    # matches the convention the tool already uses for custom T_Bkg slots
+    # (custom_slots.json: "T_Bkg_Hor_001" etc.). UE treats 3-digit names as
+    # custom assets and resolves them via pak filename lookup, so they don't
+    # need to be in AssetRegistry.bin (which only ships the 20 base game
+    # T_New entries). This is what makes our genre-shelf slots work past the
+    # base game cap — same trick now applies to NR slots.
+    used = {s.get("tex_num") for s in NR_SLOT_DATA if s.get("genre") == genre}
+    tex_num = next(i for i in range(1, 1000) if i not in used)
+    bkg_tex = f"T_New_{code}_{tex_num:03d}"
 
     # Generate a 5-digit SKU unique across all NR slots
     existing_skus = {s["sku"] for s in NR_SLOT_DATA}
@@ -2137,12 +2149,272 @@ def add_nr_slot(genre, title="New Release", standee_shape="A"):
         "sku": sku,
         "standee_shape": standee_shape,
         "tex_num": tex_num,
-        "created_at": _now_iso(),
     }
     NR_SLOT_DATA.append(slot)
     save_nr_slots()
     print(f"[NR] Added '{title}' ({genre}) as {bkg_tex}, SKU={sku}, standee={standee_shape}")
     return slot
+
+def _rebuild_uasset_with_name_patches(data, package_name_old, package_name_new,
+                                      name_table_patches):
+    """Generic uasset rebuilder for length-changing FName/PackagePath patches.
+
+    Used by create_mi_for_nr and clone_standee_blueprint when 2-digit slot
+    references need to become 3-digit (string grows by 1+ bytes per occurrence,
+    breaking length-prefix and offset fields).
+
+    Args:
+        data: bytes/bytearray of the source uasset
+        package_name_old: the current PackageName FString in the header (e.g.
+            "/Game/.../MI_New_Hor_04"). Used to find and replace the header
+            FString at offset 0x24.
+        package_name_new: the new PackageName FString to write.
+        name_table_patches: list of (old_substring, new_substring) tuples. For
+            each name table entry, if the entry contains old_substring the
+            entry is replaced (substring substitution). Length differences are
+            handled — entry sizes and downstream offsets are recomputed.
+
+    Returns the rebuilt bytes. FName hashes for any patched entry are zeroed
+    (UE re-hashes from the string at load time and avoids hash collisions
+    between assets cloned from the same template).
+
+    The rebuild mirrors the pattern in clone_texture_3digit:
+      - Copy bytes 0x00..0x20 (uasset header up to PackageName length).
+      - Write new PackageName length + new PackageName bytes.
+      - Copy bytes from old fse to old name_table start.
+      - Walk the name table, applying patches per entry, recomputing lengths.
+      - Copy everything after the name table verbatim.
+      - Update offset fields in the header (name_offset, plus the standard
+        export/import-related offsets) by the cumulative byte shift.
+    """
+    data = bytes(data)
+    pkg_len_old = struct.unpack_from('<i', data, 0x20)[0]
+    fse = 0x24 + pkg_len_old
+    name_count = struct.unpack_from('<i', data, fse + 4)[0]
+    name_offset = struct.unpack_from('<i', data, fse + 8)[0]
+
+    # --- Rebuild header up through PackageName ---
+    new_data = bytearray(data[:0x20])
+    new_pkg = package_name_new.encode("utf-8") + b"\x00"
+    new_data += struct.pack('<i', len(new_pkg))
+    new_data += new_pkg
+    new_fse = len(new_data)
+    new_data += data[fse:name_offset]
+    new_name_offset = len(new_data)
+
+    # --- Walk name table, apply patches ---
+    pos = name_offset
+    for _ in range(name_count):
+        if pos + 4 > len(data):
+            break
+        slen = struct.unpack_from('<i', data, pos)[0]
+        if slen <= 0 or slen > 500:
+            break
+        s_bytes = data[pos + 4:pos + 4 + slen]   # includes null terminator
+        hash_val = struct.unpack_from('<I', data, pos + 4 + slen)[0]
+        s_str = s_bytes[:-1].decode('utf-8', 'replace')
+
+        patched = False
+        for old_s, new_s in name_table_patches:
+            if old_s and old_s in s_str:
+                s_str = s_str.replace(old_s, new_s)
+                patched = True
+        if patched:
+            s_bytes = s_str.encode("utf-8") + b"\x00"
+            hash_val = 0  # invalidate hash so UE re-hashes from string
+
+        new_data += struct.pack('<i', len(s_bytes))
+        new_data += s_bytes
+        new_data += struct.pack('<I', hash_val)
+        pos += 4 + slen + 4
+
+    # --- Copy everything after the name table verbatim ---
+    new_data += data[pos:]
+    total_shift = len(new_data) - len(data)
+
+    # --- Fix offset fields in the export header section ---
+    # name_offset (relative offset 8 from fse) is already implicit in our
+    # rebuild — set it explicitly from the new layout.
+    struct.pack_into('<i', new_data, new_fse + 8, new_name_offset)
+    # The other offset fields point at locations AFTER the name table.
+    # Each needs to be bumped by total_shift (provided it was non-zero).
+    for rel in [16, 32, 40, 44, 136, 160, 176]:
+        abs_pos = new_fse + rel
+        if abs_pos + 4 > len(new_data):
+            continue
+        old_val = struct.unpack_from('<i', new_data, abs_pos)[0]
+        if old_val > 0:
+            struct.pack_into('<i', new_data, abs_pos, old_val + total_shift)
+
+    # Patch serial_offset in the export entry (export_off + 36 holds an
+    # int64 that points at the end of the file).
+    new_export_off = struct.unpack_from('<i', new_data, new_fse + 32)[0]
+    new_export_count = struct.unpack_from('<i', new_data, new_fse + 28)[0]
+    if new_export_off + 44 <= len(new_data):
+        struct.pack_into('<q', new_data, new_export_off + 36, len(new_data))
+
+    # Multi-export assets (Blueprints): Export[1..N].SerialOffset also point
+    # into the merged uasset+uexp stream and must each be shifted by
+    # total_shift, otherwise UE seeks to a stale position in the merged
+    # stream and crashes in FAsyncLoadingThread.
+    if new_export_count > 1 and total_shift != 0:
+        orig_export_off = struct.unpack_from('<i', data, fse + 32)[0]
+        e0_size = struct.unpack_from('<q', data, orig_export_off + 28)[0]
+        e0_off  = struct.unpack_from('<q', data, orig_export_off + 36)[0]
+        expected_e1_off = e0_off + e0_size
+        detected_esz = None
+        for candidate in (96, 104, 100, 88, 112):
+            probe = orig_export_off + candidate + 36
+            if probe + 8 > len(data):
+                continue
+            if struct.unpack_from('<q', data, probe)[0] == expected_e1_off:
+                detected_esz = candidate
+                break
+        if detected_esz is not None:
+            for i in range(1, new_export_count):
+                base_new = new_export_off + i * detected_esz
+                if base_new + 36 + 8 > len(new_data):
+                    break
+                old_v = struct.unpack_from('<q', new_data, base_new + 36)[0]
+                if old_v > 0:
+                    struct.pack_into('<q', new_data, base_new + 36,
+                                     old_v + total_shift)
+
+    return bytes(new_data)
+
+
+def _t_new_donor_for(genre_code):
+    """Return the (donor_code, donor_num) pair to clone from for T_New textures.
+
+    Donor is always Horror_01 — Hor has base_new=4 and is guaranteed extractable
+    from the base game pak. clone_texture_3digit handles cross-genre name
+    patches automatically (T_New_Hor → T_New_<code>, T_Bkg_Hor → T_Bkg_<code>).
+    """
+    return ("Hor", 1)
+
+
+def _uasset_packagename(uasset_path):
+    """Read the PackageName FString from a uasset header, or None on error.
+    Used to validate that a cached donor file is the correct 2-digit T_New
+    asset (vs a buggy T_Bkg/3-digit clone left over from older tool runs)."""
+    try:
+        with open(uasset_path, "rb") as f:
+            head = f.read(256)
+        pkg_len = struct.unpack_from('<i', head, 0x20)[0]
+        if pkg_len <= 0 or pkg_len > 200 or 0x24 + pkg_len > len(head):
+            return None
+        return head[0x24:0x24 + pkg_len - 1].decode('utf-8', 'replace')
+    except Exception:
+        return None
+
+
+def prepare_nr_donor_in_cache(pak_cache, genre_code, tex_num):
+    """Materialize T_New_<code>_<NN:03d>.uasset/uexp/ubulk inside the PakCache
+    base_dir so subsequent inject_texture / get_base_files calls see it.
+
+    Uses 3-digit format (T_New_Hor_005, not T_New_Hor_05). This matches the
+    convention the tool already uses for custom T_Bkg slots (T_Bkg_Hor_001
+    etc. in custom_slots.json). UE treats 3-digit names as custom assets and
+    resolves them via pak filename lookup, so they don't need to be in the
+    AssetRegistry — which only ships the 20 base-game T_New entries.
+
+    Donor is always T_New_Hor_01 from the base pak (cross-genre clone).
+    clone_texture_3digit handles the full asset rebuild — package name,
+    name table entries, and offset fields all get updated for the length
+    change (T_New_Hor_01 → T_New_<code>_<NN:03d>, +1 to +N bytes).
+
+    Validates an existing cache file's PackageName before skipping — old
+    caches from pre-fix tool versions contain 2-digit names which need to
+    be re-cloned as 3-digit. Returns True on success.
+    """
+    target_name = f"T_New_{genre_code}_{tex_num:03d}"
+    target_folder = f"T_Bkg_{genre_code}"
+    target_dir = os.path.join(pak_cache._base_dir, target_folder)
+    target_uasset = os.path.join(target_dir, f"{target_name}.uasset")
+    expected_pkg_suffix = f"/{target_name}"
+    cached_pkg = _uasset_packagename(target_uasset)
+    pkg_ok = (cached_pkg is not None
+              and cached_pkg.endswith(expected_pkg_suffix))
+    sidecars_ok = all(
+        os.path.exists(os.path.join(target_dir, f"{target_name}.{ext}"))
+        for ext in ("uexp", "ubulk"))
+    if pkg_ok and sidecars_ok:
+        return True
+    if cached_pkg is not None and not pkg_ok:
+        print(f"[NR] Cache invalid for {target_name} (was {cached_pkg!r}) — re-cloning")
+
+    donor_code, donor_num = _t_new_donor_for(genre_code)
+    donor_name = f"T_New_{donor_code}_{donor_num:02d}"
+    donor_folder = f"T_Bkg_{donor_code}"
+    donor_dir = os.path.join(pak_cache._base_dir, donor_folder)
+    os.makedirs(donor_dir, exist_ok=True)
+    donor_pak_path = (f"RetroRewind/Content/VideoStore/asset/prop/vhs"
+                      f"/Background/{donor_folder}/{donor_name}")
+    for ext in ("uasset", "uexp", "ubulk"):
+        if not os.path.exists(os.path.join(donor_dir, f"{donor_name}.{ext}")):
+            subprocess.run(
+                [pak_cache.repak_path, "unpack",
+                 "-o", pak_cache._extract_dir, "-f",
+                 "-i", f"{donor_pak_path}.{ext}",
+                 pak_cache.pak_path],
+                capture_output=True, text=True, timeout=30,
+            )
+    for ext in ("uasset", "uexp", "ubulk"):
+        if not os.path.exists(os.path.join(donor_dir, f"{donor_name}.{ext}")):
+            print(f"[NR] prepare_nr_donor_in_cache: donor {donor_name}.{ext} "
+                  f"unavailable for {target_name}")
+            return False
+
+    os.makedirs(target_dir, exist_ok=True)
+    # uexp + ubulk: copy verbatim from donor. Pixel data is name-independent.
+    for ext in ("uexp", "ubulk"):
+        shutil.copy2(os.path.join(donor_dir, f"{donor_name}.{ext}"),
+                     os.path.join(target_dir, f"{target_name}.{ext}"))
+    # uasset: full asset rebuild via clone_texture_3digit (handles length
+    # change from 2-digit donor to 3-digit target, fixes all header offsets,
+    # zeroes patched FName hashes).
+    with open(os.path.join(donor_dir, f"{donor_name}.uasset"), "rb") as f:
+        donor_ua = f.read()
+    cloned_ua = clone_texture_3digit(donor_ua, donor_code, donor_num,
+                                     genre_code, tex_num)
+    with open(os.path.join(target_dir, f"{target_name}.uasset"), "wb") as f:
+        f.write(cloned_ua)
+    print(f"[NR] Cached donor {target_name} ← {donor_name}"
+          + (" (cross-genre)" if donor_code != genre_code else ""))
+    return True
+
+
+def ensure_nr_texture(pak_cache, genre_code, tex_num, work_dir):
+    """Guarantee that T_New_{code}_{NN:03d} uasset/uexp/ubulk exist in work_dir.
+
+    Called for every NR slot at build time. Idempotent — does nothing if
+    the user uploaded a custom image (inject_texture already wrote the
+    files). For slots without a custom image, copies the cached 3-digit
+    donor files into work_dir so the slot at least shows the base donor
+    cover instead of being missing.
+    """
+    name = f"T_New_{genre_code}_{tex_num:03d}"
+    folder = f"T_Bkg_{genre_code}"
+    dest = os.path.join(work_dir, "RetroRewind", "Content", "VideoStore",
+                        "asset", "prop", "vhs", "Background", folder)
+    if all(os.path.exists(os.path.join(dest, f"{name}.{ext}"))
+           for ext in ("uasset", "uexp", "ubulk")):
+        return True
+
+    if not prepare_nr_donor_in_cache(pak_cache, genre_code, tex_num):
+        return False
+
+    src_dir = os.path.join(pak_cache._base_dir, folder)
+    os.makedirs(dest, exist_ok=True)
+    for ext in ("uasset", "uexp", "ubulk"):
+        src = os.path.join(src_dir, f"{name}.{ext}")
+        if not os.path.exists(src):
+            print(f"[NR] ensure_nr_texture: cached {name}.{ext} missing")
+            return False
+        shutil.copy2(src, os.path.join(dest, f"{name}.{ext}"))
+    print(f"[NR] Wrote {name} to work_dir (no user image, used cached donor)")
+    return True
+
 
 def remove_nr_slot(idx):
     """Remove NR slot by index."""
@@ -3691,7 +3963,21 @@ def build_newrelease_datatable(pak_cache, new_releases, output_dir):
     Returns True on success.
     """
     DT_NAME = "NewRelease_Details_-_Data"
-    ROW_SIZE = 54
+    # Row size is bkg_b-length-dependent. Base game rows use 13-byte bkg_b
+    # ("T_New_Hor_01\0") → row_size 54. Our custom 3-digit slots use 14-byte
+    # bkg_b ("T_New_Hor_001\0") → row_size 55. Since the tool ships only
+    # 3-digit NRs (we don't reuse base game NR slots), all rows are 55 bytes.
+    BI_LEN = 14            # length of bkg_tex FString incl null terminator (3-digit)
+    BI_OFFSET = 27         # byte offset where bkg_b starts within a row
+    # Field offsets after BI: genre(1) + layout(4) + sku(2) + pad(2) + ntu(1) + next(4) = 14
+    GENRE_OFF = BI_OFFSET + BI_LEN          # 41
+    LAYOUT_OFF = GENRE_OFF + 1              # 42 (int32 = -1)
+    SKU_OFF = LAYOUT_OFF + 4                # 46 (uint16)
+    NTU_OFF = SKU_OFF + 4                   # 50 (after 2-byte SKU + 2-byte padding)
+    NEXT_KEY_OFF = NTU_OFF + 1              # 51 (uint32)
+    ROW_SIZE = NEXT_KEY_OFF + 4             # 55
+    RK_NUM = 0x01A81780
+    PLAIN_FOOTER = b"\x00\x00\x00\x00\xC1\x83\x2A\x9E"
     RK_NUM = 0x01A81780
     PLAIN_FOOTER = b"\x00\x00\x00\x00\xC1\x83\x2A\x9E"
 
@@ -3767,8 +4053,9 @@ def build_newrelease_datatable(pak_cache, new_releases, output_dir):
     orig_row_count = struct.unpack_from("<H", ue, row_count_off)[0]
     print(f"[NewRelease] ROW_START=0x{row_start:X}, orig_rows={orig_row_count}")
 
-    # --- Get template row (first row from base game) ---
-    tmpl = bytearray(ue[row_start:row_start + ROW_SIZE])
+    # No template row needed — we build each row from scratch with the
+    # 3-digit (55-byte) layout. The base game's first row uses the 13-byte
+    # bkg_b (54-byte) layout, which would mis-align all our fields.
 
     # --- Check which titles need adding to name table ---
     new_ua = bytearray(ua_orig)
@@ -3848,7 +4135,12 @@ def build_newrelease_datatable(pak_cache, new_releases, output_dir):
     new_rows = bytearray()
 
     for idx, nr in enumerate(new_releases):
-        row = bytearray(tmpl)
+        bkg_b = nr["bkg_tex"].encode("utf-8") + b"\x00"
+        if len(bkg_b) != BI_LEN:
+            print(f"[NewRelease] WARNING: row {idx} bkg_tex {nr['bkg_tex']!r} "
+                  f"is {len(bkg_b)} bytes, expected {BI_LEN} (3-digit format) — skipping")
+            continue
+        row = bytearray(ROW_SIZE)
 
         # Unique RowKey: name index for string "idx+1" (e.g. "1", "2", "3")
         rk_str = str(idx + 1)
@@ -3863,25 +4155,23 @@ def build_newrelease_datatable(pak_cache, new_releases, output_dir):
         struct.pack_into("<i", row, 16, 3)
         row[20:23] = b"-1\x00"
 
-        bkg_b = nr["bkg_tex"].encode("utf-8") + b"\x00"
-        struct.pack_into("<i", row, 23, len(bkg_b))
-        row[27:27 + len(bkg_b)] = bkg_b
+        struct.pack_into("<i", row, 23, BI_LEN)
+        row[BI_OFFSET:BI_OFFSET + BI_LEN] = bkg_b
 
-        row[40] = nr["genre_byte"]
-        struct.pack_into("<i", row, 41, -1)
-        struct.pack_into("<H", row, 45, nr["sku"])
-        row[47] = 0
-        row[48] = 0
-        row[49] = 1
+        row[GENRE_OFF] = nr["genre_byte"]
+        struct.pack_into("<i", row, LAYOUT_OFF, -1)
+        struct.pack_into("<H", row, SKU_OFF, nr["sku"])
+        # SKU+2 and SKU+3 are pad bytes (already 0 from bytearray init).
+        row[NTU_OFF] = 1   # NewToUnlock = true
 
         # Linked list: points to NEXT row's key name index, last row = 0
         is_last = (idx == n_rows - 1)
         if is_last:
-            struct.pack_into("<I", row, 50, 0)
+            struct.pack_into("<I", row, NEXT_KEY_OFF, 0)
         else:
             next_rk_str = str(idx + 2)
             next_rk_idx = working_names.index(next_rk_str)
-            struct.pack_into("<I", row, 50, next_rk_idx)
+            struct.pack_into("<I", row, NEXT_KEY_OFF, next_rk_idx)
 
         new_rows += row
         print(f"[NewRelease] Row {idx}: key='{rk_str}'(idx={rk_idx}) "
@@ -4033,51 +4323,61 @@ def create_standee_thumbnail(sku, standee_shape, output_dir, texconv):
     return True
 
 def create_mi_for_nr(genre_code, tex_num, standee_shape, output_dir):
-    """Create a Material Instance for a New Release standee.
+    """Create a 3-digit Material Instance for a New Release standee.
 
     Patches the embedded MI template (MI_New_Hor_04, Standee A) to produce
-    MI_New_{genre_code}_{tex_num:02d} with the correct T_Standee_{shape}_01_ao.
+    MI_New_{genre_code}_{tex_num:03d} with the correct T_Standee_{shape}_01_ao.
 
-    All replacements are same-length (3-char genre, 2-char num, 1-char shape),
-    so no offset adjustments are needed. The uexp is shared across ALL MIs.
+    The slot number patch (Hor_04 → <code>_<NN:03d>) changes string length
+    from 6 to 7 chars, which shifts all name-table offsets in the uasset.
+    _rebuild_uasset_with_name_patches handles the full asset rebuild and
+    zeroes FName hashes for patched entries.
 
     Args:
         genre_code: 3-char code e.g. "Hor", "Act", "Fan"
-        tex_num: int, slot number e.g. 1, 4
+        tex_num: int, slot number e.g. 1, 4, 25
         standee_shape: "A", "B", or "C"
         output_dir: build work directory
 
     Returns True on success.
     """
-    data = bytearray(_MI_UASSET_TEMPLATE)
+    # Build patch list.
+    # MI's name table has these slot/shape/genre-bearing FName entries:
+    #   - "MI_New_Hor_04" + "/Game/.../T_Bkg_Hor/MI_New_Hor_04"
+    #   - "T_New_Hor_04" + "/Game/.../T_Bkg_Hor/T_New_Hor_04"
+    #   - "T_Standee_A_01_ao" + "/Game/.../T_Standee_A_01/T_Standee_A_01_ao"
+    # The patches use longer (3-digit) replacements where applicable.
+    src_gn = f"{_MI_TEMPLATE_GENRE}_{_MI_TEMPLATE_NUM:02d}"   # "Hor_04"
+    dst_gn = f"{genre_code}_{tex_num:03d}"                    # "Hor_005"
+    src_folder = f"T_Bkg_{_MI_TEMPLATE_GENRE}"
+    dst_folder = f"T_Bkg_{genre_code}"
+    # AO file name only (not the folder). Base game keeps all shape AOs in
+    # the shared folder T_Standee_A_01/ — patching "T_Standee_A" wholesale
+    # would also rewrite the folder path to T_Standee_B_01/ for shape B,
+    # where the AO doesn't exist, causing UE to fall back to a default
+    # material and the standee renders with a dark band where the AO
+    # should be sampled.
+    src_ao = f"T_Standee_{_MI_TEMPLATE_SHAPE}_01_ao"
+    dst_ao = f"T_Standee_{standee_shape}_01_ao"
+    patches = []
+    if src_gn != dst_gn:
+        patches.append((src_gn, dst_gn))
+    if src_folder != dst_folder:
+        patches.append((src_folder, dst_folder))
+    if src_ao != dst_ao:
+        patches.append((src_ao, dst_ao))
 
-    # Replace genre+number: "Hor_04" → "{genre}_{num:02d}"
-    old_gn = f"{_MI_TEMPLATE_GENRE}_{_MI_TEMPLATE_NUM:02d}".encode('ascii')
-    new_gn = f"{genre_code}_{tex_num:02d}".encode('ascii')
-    if len(old_gn) != len(new_gn):
-        print(f"[MI] ERROR: genre+num length mismatch")
+    src_pkg = f"/Game/VideoStore/asset/prop/vhs/Background/{src_folder}/MI_New_{src_gn}"
+    dst_pkg = f"/Game/VideoStore/asset/prop/vhs/Background/{dst_folder}/MI_New_{dst_gn}"
+
+    try:
+        new_uasset = _rebuild_uasset_with_name_patches(
+            _MI_UASSET_TEMPLATE, src_pkg, dst_pkg, patches)
+    except Exception as e:
+        print(f"[MI] ERROR rebuilding uasset: {e}")
         return False
 
-    # Replace genre folder: "T_Bkg_Hor" → "T_Bkg_{genre}"
-    old_folder = f"T_Bkg_{_MI_TEMPLATE_GENRE}".encode('ascii')
-    new_folder = f"T_Bkg_{genre_code}".encode('ascii')
-    if len(old_folder) != len(new_folder):
-        print(f"[MI] ERROR: folder length mismatch")
-        return False
-
-    # Replace AO texture shape: "T_Standee_A_01_ao" → "T_Standee_{shape}_01_ao"
-    old_ao = f"T_Standee_{_MI_TEMPLATE_SHAPE}_01_ao".encode('ascii')
-    new_ao = f"T_Standee_{standee_shape}_01_ao".encode('ascii')
-
-    n1 = bytes(data).count(old_gn)
-    n2 = bytes(data).count(old_folder)
-    n3 = bytes(data).count(old_ao)
-
-    data = bytearray(bytes(data).replace(old_gn, new_gn))
-    data = bytearray(bytes(data).replace(old_folder, new_folder))
-    data = bytearray(bytes(data).replace(old_ao, new_ao))
-
-    mi_name = f"MI_New_{genre_code}_{tex_num:02d}"
+    mi_name = f"MI_New_{genre_code}_{tex_num:03d}"
     folder_name = f"T_Bkg_{genre_code}"
     dest = os.path.join(output_dir, "RetroRewind", "Content",
                         "VideoStore", "asset", "prop", "vhs",
@@ -4085,12 +4385,12 @@ def create_mi_for_nr(genre_code, tex_num, standee_shape, output_dir):
     os.makedirs(dest, exist_ok=True)
 
     with open(os.path.join(dest, f"{mi_name}.uasset"), 'wb') as f:
-        f.write(bytes(data))
+        f.write(new_uasset)
     with open(os.path.join(dest, f"{mi_name}.uexp"), 'wb') as f:
         f.write(_MI_UEXP_TEMPLATE)
 
     print(f"[MI] Created {mi_name} (shape={standee_shape}) "
-          f"[gn:{n1} folder:{n2} ao:{n3}]")
+          f"[uasset={len(new_uasset)} bytes, +{len(new_uasset)-len(_MI_UASSET_TEMPLATE)} vs template]")
     return True
 
 def clone_standee_blueprint(pak_cache, sku, standee_shape, genre_code, tex_num, output_dir):
@@ -4153,45 +4453,43 @@ def clone_standee_blueprint(pak_cache, sku, standee_shape, genre_code, tex_num, 
     if n_fname:
         print(f"[Standee]   Thumbnail FName: 10694→{int(sku_str)+1} ({n_fname}x in uexp)")
 
-    # --- Perform same-length replacements in uasset ---
-    old_sku = b"10693"
-    new_sku = sku_str.encode("ascii")
+    # --- Build patches for full asset rebuild ---
+    # SKU and mesh shape are length-preserving (5-digit SKU, 1-char shape).
+    # Material reference Dra_03 → <code>_<NN:03d> grows by 1 byte (length
+    # change), so we use the generic full-asset rebuild helper rather than
+    # a length-preserving in-place replace.
+    src_sku = "10693"
+    src_mesh_shape = "LA_Standee_B"
+    dst_mesh_shape = f"LA_Standee_{standee_shape}"
+    src_mat = "MI_New_Dra_03"
+    dst_mat = f"MI_New_{genre_code}_{tex_num:03d}"
+    src_mat_folder = "T_Bkg_Dra"
+    dst_mat_folder = f"T_Bkg_{genre_code}"
 
-    old_mesh = b"LA_Standee_B_01"
-    new_mesh = f"LA_Standee_{standee_shape}_01".encode("ascii")
+    patches = []
+    if src_sku != sku_str:
+        patches.append((src_sku, sku_str))
+    if src_mesh_shape != dst_mesh_shape:
+        patches.append((src_mesh_shape, dst_mesh_shape))
+    if src_mat != dst_mat:
+        patches.append((src_mat, dst_mat))
+    if src_mat_folder != dst_mat_folder:
+        patches.append((src_mat_folder, dst_mat_folder))
 
-    old_mat_short = b"MI_New_Dra_03"
-    new_mat_short = f"MI_New_{genre_code}_{tex_num:02d}".encode("ascii")
+    # PackageName: Standees_Collection_10693 → Standees_Collection_<sku>
+    src_pkg = f"/Game/VideoStore/asset/prop/Standees/mesh/{tmpl_name}"
+    dst_pkg = f"/Game/VideoStore/asset/prop/Standees/mesh/Standees_Collection_{sku_str}"
 
-    old_mat_folder = b"T_Bkg_Dra"
-    new_mat_folder = f"T_Bkg_{genre_code}".encode("ascii")
-
-    # Verify lengths
-    for old, new, label in [(old_sku, new_sku, "SKU"),
-                            (old_mesh, new_mesh, "mesh"),
-                            (old_mat_short, new_mat_short, "material"),
-                            (old_mat_folder, new_mat_folder, "mat folder")]:
-        if len(old) != len(new):
-            print(f"[Standee] ERROR: {label} length mismatch: {len(old)} vs {len(new)}")
-            return False
-
-    # Replace all occurrences
-    ua_bytes = bytes(ua)
-    n_sku = ua_bytes.count(old_sku)
-    n_mesh = ua_bytes.count(old_mesh)
-    n_mat = ua_bytes.count(old_mat_short)
-    n_folder = ua_bytes.count(old_mat_folder)
-
-    ua_bytes = ua_bytes.replace(old_sku, new_sku)
-    ua_bytes = ua_bytes.replace(old_mesh, new_mesh)
-    ua_bytes = ua_bytes.replace(old_mat_short, new_mat_short)
-    ua_bytes = ua_bytes.replace(old_mat_folder, new_mat_folder)
+    try:
+        ua_bytes = _rebuild_uasset_with_name_patches(bytes(ua), src_pkg, dst_pkg, patches)
+    except Exception as e:
+        print(f"[Standee] ERROR rebuilding uasset: {e}")
+        return False
 
     print(f"[Standee] Cloned {tmpl_name} → Standees_Collection_{sku_str}")
-    print(f"[Standee]   SKU: 10693→{sku_str} ({n_sku}x), "
-          f"mesh: B→{standee_shape} ({n_mesh}x), "
-          f"mat: Dra_03→{genre_code}_{tex_num:02d} ({n_mat}x), "
-          f"folder: Dra→{genre_code} ({n_folder}x)")
+    print(f"[Standee]   SKU: 10693→{sku_str}, mesh: B→{standee_shape}, "
+          f"mat: Dra_03→{genre_code}_{tex_num:03d}, folder: Dra→{genre_code} "
+          f"[uasset={len(ua_bytes)} bytes, +{len(ua_bytes)-len(ua)} vs template]")
 
     # --- Write cloned blueprint ---
     dest = os.path.join(output_dir, "RetroRewind", "Content",
@@ -4622,7 +4920,6 @@ def add_movie_slot(genre, title, ls=0, lsc=4, sku=None, last2=93, rarity="Common
         "lsc":     lsc,
         "sku":     sku,
         "ntu":     False,
-        "created_at": _now_iso(),
     }
     slot_data.append(new_slot)
     save_custom_slots()
@@ -5115,6 +5412,38 @@ class PakCache:
         )
         self._base_game_dir = self._base_dir  # same directory — one pak
 
+        # Cache invalidation by tool version. Bugs in asset-rebuild logic
+        # (clone_texture_3digit, _rebuild_uasset_with_name_patches, …) can
+        # leave broken files in the cache that survive across runs because
+        # the cache only checks for file existence, not correctness. When
+        # a new tool version ships a fix, force re-extraction.
+        self._stamp_path = os.path.join(self._extract_dir, ".tool_version")
+        self._invalidate_stale_cache()
+
+    def _invalidate_stale_cache(self):
+        stamp = None
+        if os.path.exists(self._stamp_path):
+            try:
+                with open(self._stamp_path) as f:
+                    stamp = f.read().strip()
+            except Exception:
+                stamp = None
+        if stamp == TOOL_VERSION:
+            return
+        if os.path.exists(self._extract_dir) and os.listdir(self._extract_dir):
+            print(f"[PakCache] Cache stamp {stamp!r} != {TOOL_VERSION!r} — wiping to rebuild")
+            try:
+                shutil.rmtree(self._extract_dir)
+            except Exception as e:
+                print(f"[PakCache] Could not wipe stale cache: {e}")
+                return
+        os.makedirs(self._extract_dir, exist_ok=True)
+        try:
+            with open(self._stamp_path, "w") as f:
+                f.write(TOOL_VERSION)
+        except Exception as e:
+            print(f"[PakCache] Could not write version stamp: {e}")
+
     def _ensure_unpacked(self):
         """Unpack the whole pak if not done yet."""
         if self._unpacked:
@@ -5419,6 +5748,17 @@ class PakCache:
         name   = texture["name"]
         folder = texture["folder"]
         dest   = os.path.join(self._base_dir, folder)
+
+        # T_New textures are staged by prepare_nr_donor_in_cache in the build
+        # pre-pass: it clones T_New_Hor_01 → T_New_<code>_<NN:03d> with the
+        # correct PackageName via clone_texture_3digit. The custom-slot path
+        # below uses T_Bkg conventions (base_count=GENRES[g]["bkg"], clone
+        # source f"T_Bkg_{code}_{NN:02d}") and would overwrite the staged
+        # T_New file with one whose PackageName ends in T_Bkg_<code>_<NN>
+        # — exactly the FAsyncLoadingThread crash signature. Trust the pre-pass.
+        if name.startswith("T_New_"):
+            os.makedirs(dest, exist_ok=True)
+            return dest
 
         # Parse genre code and slot number from name (e.g. T_Bkg_Hor_23 -> Hor, 23)
         parts    = name.split('_')   # ['T', 'Bkg', 'Hor', '23']
@@ -6852,10 +7192,6 @@ class VHSToolApp:
 
         self._apply_ttk_style()
         self._build_ui()
-        # Default tab is "All Movies" — sort control is hidden on that tab
-        # (the multi-genre view doesn't sort). Visible on every other tab.
-        if hasattr(self, "_show_sort_control"):
-            self._show_sort_control(False)
         self._populate_shelf()
         self._preload_layouts()
         # Background preload all 5 layout textures — starts immediately,
@@ -9057,9 +9393,6 @@ class VHSToolApp:
         """Select a New Release slot for editing."""
         if idx < 0 or idx >= len(NR_SLOT_DATA):
             return
-        # Commit pending last_edited_at for whatever was previously selected.
-        self._flush_pending_edit_timestamp()
-        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
         self._selected_nr_idx = idx
         nr = NR_SLOT_DATA[idx]
 
@@ -9125,7 +9458,6 @@ class VHSToolApp:
         new_title = self._inline_title_var.get().strip()
         if new_title and new_title != NR_SLOT_DATA[idx]["title"]:
             NR_SLOT_DATA[idx]["title"] = new_title
-            self._mark_nr_edited(idx)
             save_nr_slots()
             self._refresh_shelf_keep_scroll()
 
@@ -9177,19 +9509,7 @@ class VHSToolApp:
                   command=dlg.destroy).pack(pady=8)
         self.root.wait_window(dlg)
         if chosen[0]:
-            genre = chosen[0]
-            # Pre-check the per-genre cap so we can show a clear message
-            existing_count = sum(1 for s in NR_SLOT_DATA if s.get("genre") == genre)
-            if existing_count >= 99:
-                messagebox.showwarning(
-                    "New Release limit reached",
-                    f"'{genre}' already has the maximum of 99 New Releases.\n\n"
-                    f"To add another, delete an existing NR in this genre first, "
-                    f"or pick a different genre.",
-                    parent=self.root,
-                )
-                return
-            slot = add_nr_slot(genre)
+            slot = add_nr_slot(chosen[0])
             if slot:
                 self._populate_shelf()
                 self._select_nr_slot(len(NR_SLOT_DATA) - 1)
@@ -9202,7 +9522,6 @@ class VHSToolApp:
         new_shape = self._nr_standee_var.get()
         if new_shape in NR_STANDEE_SHAPES:
             NR_SLOT_DATA[idx]["standee_shape"] = new_shape
-            self._mark_nr_edited(idx)
             save_nr_slots()
             self._populate_shelf()
 
@@ -9233,23 +9552,13 @@ class VHSToolApp:
             nr["genre_code"] = GENRES[new_genre]["code"]
             nr["genre_byte"] = NR_GENRE_BYTE[new_genre]
             code = nr["genre_code"]
-            base_new_count = GENRES[new_genre].get("new", 0)
-            if base_new_count == 0:
-                return
-            # Find the lowest available tex_num for this genre
-            # (exclude the current slot itself from the check)
+            # Find the lowest available tex_num for the new genre (gap-tolerant,
+            # no base_new_count cap — slots beyond base get auto-cloned at build).
             used_nums = {s["tex_num"] for i, s in enumerate(NR_SLOT_DATA)
                          if s.get("genre") == new_genre and i != idx}
-            tex_num = 1
-            while tex_num in used_nums:
-                tex_num += 1
-                if tex_num > base_new_count:
-                    # Wrap around — multiple slots will share a texture
-                    tex_num = (len(used_nums) % base_new_count) + 1
-                    break
+            tex_num = next(i for i in range(1, 1000) if i not in used_nums)
             nr["tex_num"] = tex_num
-            nr["bkg_tex"] = f"T_New_{code}_{tex_num:02d}"
-            self._mark_nr_edited(idx)
+            nr["bkg_tex"] = f"T_New_{code}_{tex_num:03d}"
             save_nr_slots()
             self._populate_shelf()
 
@@ -9300,7 +9609,6 @@ class VHSToolApp:
         idx = getattr(self, '_selected_nr_idx', -1)
         if 0 <= idx < len(NR_SLOT_DATA):
             NR_SLOT_DATA[idx]["standee_shape"] = shape
-            self._mark_nr_edited(idx)
             save_nr_slots()
             # Auto-switch to Standee preview mode
             if hasattr(self, '_nr_view_mode') and self._nr_view_mode.get() != "Standee":
@@ -10499,21 +10807,6 @@ class VHSToolApp:
         self.root.after(80, _phase2)
 
     # ── Populate Shelf (tile gallery) ─────────────────────────
-    #
-    # IMPORTANT NOTE FOR ANY AI / DEVELOPER READING THIS:
-    # ====================================================
-    # The shelf in this tool ONLY shows user-created custom slots.
-    # Base game movies are NEVER displayed in the shelf, even though they
-    # exist in the underlying DataTables. This is because the tool runs in
-    # CUSTOM_ONLY_MODE = True, which filters out all base T_Bkg slots from
-    # the shelf and only shows slots the user has personally created.
-    # The presence of T_Bkg_<Genre>_001..N entries does NOT mean those are
-    # base game movies — those are user-created custom slots using the
-    # 3-digit naming convention. Base game uses 2-digit names like T_Bkg_Hor_01.
-    # Don't ever assume the shelf includes base game movies. It does not.
-    # Sort logic, filter logic, and any iteration over what the user sees
-    # in the shelf operates on custom slots only.
-    # ====================================================
     def _populate_shelf(self, *args):
         self._genre_header_widgets = []
         for w in self._shelf_frame.winfo_children():
@@ -10938,10 +11231,6 @@ class VHSToolApp:
 
     def _on_select_texture(self, texture):
         """Handle selection of a texture tile."""
-        # Commit pending last_edited_at for the slot being navigated AWAY from.
-        # Both flushes are no-ops if nothing was flagged dirty.
-        self._flush_pending_edit_timestamp()
-        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
         self.selected = texture
         self._selected_nr_idx = -1
         self._auto_fit = False
@@ -13717,9 +14006,6 @@ class VHSToolApp:
         return dest
 
     def _build(self):
-        # Commit any pending last_edited_at timestamps before we serialize everything.
-        self._flush_pending_edit_timestamp()
-        self._flush_pending_nr_timestamp(getattr(self, "_selected_nr_idx", -1))
         # Allow build even with no replacements if there are custom slots
         has_custom = any(
             len(slots) > GENRES[g]["bkg"]
@@ -13925,6 +14211,16 @@ class VHSToolApp:
             _nr_by_stable_key[f"NR_{nr['sku']}"] = nr
         print(f"[Build] Replacement keys: {list(self.replacements.keys())}")
 
+        # NR donor pre-pass: stage T_New_<code>_<NN:03d> in pak_cache._base_dir
+        # for every NR slot. The tool ships custom NRs as 3-digit assets only
+        # — we don't reuse base game NR slots. Building all donors up-front
+        # ensures the replacement loop and ensure_nr_texture both find valid
+        # 3-digit source files instead of falling into legacy buggy paths.
+        for _nr in NR_SLOT_DATA:
+            _gcode = _nr.get("genre_code", "")
+            _tnum = _nr.get("tex_num", 1)
+            prepare_nr_donor_in_cache(self.pak_cache, _gcode, _tnum)
+
         # Process user-uploaded textures (T_Bkg + NR injection)
         for i, (name, entry) in enumerate(self.replacements.items()):
             prog_lbl.config(text=f"Processing {i+1}/{total}: {name}")
@@ -14105,6 +14401,17 @@ class VHSToolApp:
         # We reuse its title but give it a new SKU to prove our build works.
         # --- Build New Release DataTable + standee blueprints ---
         if NR_SLOT_DATA:
+            # Pre-pass: ensure a T_New texture file exists for every NR slot.
+            # For tex_num within the base game range this is a no-op (the
+            # 3-digit T_New donors aren't in the base pak, so this clones
+            # from T_New_Hor_01 for every NR slot that doesn't already have
+            # a user image. Idempotent — skips if inject_texture already
+            # wrote the files.
+            for _nr in NR_SLOT_DATA:
+                _gcode = _nr.get("genre_code", "")
+                _tnum = _nr.get("tex_num", 1)
+                ensure_nr_texture(self.pak_cache, _gcode, _tnum, work)
+
             nr_ok = build_newrelease_datatable(self.pak_cache, NR_SLOT_DATA, work)
             if nr_ok:
                 print(f"[Build] NewRelease_Details built OK ({len(NR_SLOT_DATA)} NR slots)")
@@ -14124,7 +14431,6 @@ class VHSToolApp:
         # Include a copy of the base game's AssetRegistry.bin in the mod pak.
         # This is currently a passthrough (no modifications) to test that the game
         # accepts a mod pak with an AssetRegistry without crashing.
-        # Future: add new slot entries here to extend genre caps beyond their defaults.
         ar_src = self._extract_asset_registry(work)
         if ar_src:
             print(f"[Build] AssetRegistry.bin included ({round(os.path.getsize(ar_src)/1024)} KB)")

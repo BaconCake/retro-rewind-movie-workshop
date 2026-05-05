@@ -22,8 +22,11 @@ edited_slots.json
 shipped_slots.json
 sort_preferences.json
 
-# ── Backups created by the tool ─────────────────────────────────────────
+# ── Backups created by the tool or by manual editing ────────────────────
 *.json.bak
+*.py.bak
+*.backup_*
+RR_VHS_Tool.py.backup*
 
 # ── Generated runtime folders ───────────────────────────────────────────
 Output/
@@ -38,6 +41,14 @@ _pak_cache/
 *.jpg
 *.jpeg
 *.webp
+test_covers/
+
+# ── Dev / test scripts (NOT shipped to users) ───────────────────────────
+# Local diagnostics, fixture generators, and pre-flight verification
+# scripts. The build & release workflow doesn't need them.
+diag_*.py
+generate_test_library.py
+sanity_check_all_nrs.py
 
 # ── PyInstaller build artifacts ─────────────────────────────────────────
 build/

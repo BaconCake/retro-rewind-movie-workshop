@@ -12,10 +12,20 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Verify release notes exist
+      shell: pwsh
+      run: |
+        $notes = "RELEASE_NOTES_${{ github.event.inputs.version }}.md"
+        if (-not (Test-Path $notes)) {
+          Write-Error "Release notes file '$notes' not found. Create it before triggering this workflow."
+          exit 1
+        }
+        Write-Host "Release notes file found: $notes ($(Get-Item $notes | Select-Object -ExpandProperty Length) bytes)"
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -74,7 +84,7 @@ jobs:
         New-Item -ItemType Directory -Path "dist\RR_Movie_Workshop\tools" -Force
         Copy-Item "repak.exe" "dist\RR_Movie_Workshop\tools\"
         Copy-Item "texconv.exe" "dist\RR_Movie_Workshop\tools\"
-        
+
         # Copy licenses
         New-Item -ItemType Directory -Path "dist\RR_Movie_Workshop\LICENSES" -Force
         if (Test-Path "LICENSE") {
@@ -83,15 +93,15 @@ jobs:
         if (Test-Path "LICENSES") {
           Copy-Item "LICENSES\*" "dist\RR_Movie_Workshop\LICENSES\" -Recurse
         }
-        
+
         # Copy README
         if (Test-Path "README.txt") {
           Copy-Item "README.txt" "dist\RR_Movie_Workshop\"
         }
-        
+
         # Create zip
         Compress-Archive -Path "dist\RR_Movie_Workshop\*" -DestinationPath "RR_Movie_Workshop_${{ github.event.inputs.version }}.zip"
-        
+
         Write-Host "Package contents:"
         Get-ChildItem "dist\RR_Movie_Workshop\" -Recurse | ForEach-Object { Write-Host "  $($_.FullName.Replace((Get-Location).Path + '\dist\RR_Movie_Workshop\', ''))" }
       shell: pwsh
@@ -100,17 +110,17 @@ jobs:
       run: |
         $zip_hash = (Get-FileHash "RR_Movie_Workshop_${{ github.event.inputs.version }}.zip" -Algorithm SHA256).Hash
         $exe_hash = (Get-FileHash "dist\RR_Movie_Workshop\RR_Movie_Workshop.exe" -Algorithm SHA256).Hash
-        
+
         $checksums = @"
         SHA256 Checksums for ${{ github.event.inputs.version }}
-        
+
         RR_Movie_Workshop_${{ github.event.inputs.version }}.zip:
           $zip_hash
-        
+
         RR_Movie_Workshop.exe:
           $exe_hash
         "@
-        
+
         $checksums | Out-File -FilePath "checksums.txt" -Encoding utf8
         Write-Host $checksums
       shell: pwsh
@@ -120,26 +130,7 @@ jobs:
       with:
         tag_name: ${{ github.event.inputs.version }}
         name: "Retro Rewind Movie Workshop ${{ github.event.inputs.version }}"
-        body: |
-          ## Retro Rewind Movie Workshop ${{ github.event.inputs.version }}
-          
-          Custom VHS cover art and New Release standee tool for Retro Rewind.
-          
-          ### Download
-          Download `RR_Movie_Workshop_${{ github.event.inputs.version }}.zip`, extract anywhere, and run `RR_Movie_Workshop.exe`.
-          
-          Everything is included — no Python or additional software needed.
-          
-          ### Included
-          - RR_Movie_Workshop.exe (the tool)
-          - tools/repak.exe (pak operations, MIT License)
-          - tools/texconv.exe (texture conversion, MIT License)
-          
-          ### Checksums
-          See `checksums.txt` for SHA256 hashes to verify file integrity.
-          
-          ### Nexus Mods
-          Also available at: https://www.nexusmods.com/retrorewindvideostoresimulator/mods/82
+        body_path: RELEASE_NOTES_${{ github.event.inputs.version }}.md
         files: |
           RR_Movie_Workshop_${{ github.event.inputs.version }}.zip
           checksums.txt
