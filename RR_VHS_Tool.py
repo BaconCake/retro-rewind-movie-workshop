@@ -491,7 +491,7 @@ on specific in-game days, have standee displays, and use T_New_XXX_NN textures.
 ============================================================================="""
 
 
-TOOL_VERSION = "v1.8.2"  # bump this on every release
+TOOL_VERSION = "v1.8.2.1"  # bump this on every release
 
 # Error codes for build diagnostics — shown to users for bug reports
 ERROR_CODES = {
@@ -2382,6 +2382,43 @@ def prepare_nr_donor_in_cache(pak_cache, genre_code, tex_num):
     print(f"[NR] Cached donor {target_name} ← {donor_name}"
           + (" (cross-genre)" if donor_code != genre_code else ""))
     return True
+
+
+def prepare_nr_legacy_2digit_in_cache(pak_cache, genre_code, tex_num):
+    """Extract base game's 2-digit T_New_<code>_<NN:02d> into pak_cache._base_dir.
+
+    Used by the v1.8.2.1 legacy co-inject pass so pre-v1.8.2 saves continue
+    to display custom NR covers. The 2-digit slot exists in the base game
+    pak with the correct PackageName — extract as-is, no cloning needed.
+    Idempotent — skips if all 3 files are already cached.
+
+    Returns True iff all 3 files (uasset/uexp/ubulk) end up in cache.
+    """
+    if tex_num < 1 or tex_num > 99:
+        return False
+    target_name   = f"T_New_{genre_code}_{tex_num:02d}"
+    target_folder = f"T_Bkg_{genre_code}"
+    target_dir    = os.path.join(pak_cache._base_dir, target_folder)
+    base_pak_path = (f"RetroRewind/Content/VideoStore/asset/prop/vhs"
+                     f"/Background/{target_folder}/{target_name}")
+
+    if all(os.path.exists(os.path.join(target_dir, f"{target_name}.{ext}"))
+           for ext in ("uasset", "uexp", "ubulk")):
+        return True
+
+    os.makedirs(target_dir, exist_ok=True)
+    for ext in ("uasset", "uexp", "ubulk"):
+        if os.path.exists(os.path.join(target_dir, f"{target_name}.{ext}")):
+            continue
+        subprocess.run(
+            [pak_cache.repak_path, "unpack",
+             "-o", pak_cache._extract_dir, "-f",
+             "-i", f"{base_pak_path}.{ext}",
+             pak_cache.pak_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    return all(os.path.exists(os.path.join(target_dir, f"{target_name}.{ext}"))
+               for ext in ("uasset", "uexp", "ubulk"))
 
 
 def ensure_nr_texture(pak_cache, genre_code, tex_num, work_dir):
@@ -14427,6 +14464,44 @@ class VHSToolApp:
                 _gcode = _nr.get("genre_code", "")
                 _tnum = _nr.get("tex_num", 1)
                 ensure_nr_texture(self.pak_cache, _gcode, _tnum, work)
+
+            # Legacy 2-digit Co-Inject — pre-v1.8.2 saves reference NR
+            # textures by 2-digit FName ("T_New_Sci_01"). v1.8.2 only writes
+            # 3-digit slots, so old saves saw base-game default. For NRs whose
+            # tex_num falls within the base game's NR slot count, write the
+            # user's cover to the 2-digit slot too. NRs beyond base count
+            # (e.g. Sci_005) have no 2-digit slot in base — skipped silently.
+            for _nr in NR_SLOT_DATA:
+                _gcode = _nr.get("genre_code", "")
+                _tnum  = _nr.get("tex_num", 1)
+                _ngenre = next((g for g, info in GENRES.items()
+                                if info["code"] == _gcode), None)
+                if not _ngenre:
+                    continue
+                _base_new = GENRES[_ngenre].get("new", 0)
+                if _tnum < 1 or _tnum > _base_new:
+                    continue
+                _entry = self.replacements.get(f"NR_{_nr['sku']}")
+                if not _entry:
+                    continue  # No custom cover, leave 2-digit slot at base default
+                if not prepare_nr_legacy_2digit_in_cache(self.pak_cache, _gcode, _tnum):
+                    print(f"[NR-Legacy] Could not extract base T_New_{_gcode}_{_tnum:02d}"
+                          f" — skipping co-inject")
+                    continue
+                _legacy_tex = {
+                    "name":   f"T_New_{_gcode}_{_tnum:02d}",
+                    "genre":  _nr["genre"],
+                    "folder": f"T_Bkg_{_gcode}",
+                    "type":   "New Release",
+                }
+                _legacy_base = os.path.join(self.pak_cache._base_dir, f"T_Bkg_{_gcode}")
+                try:
+                    inject_texture(_legacy_tex, _entry, work, texconv, _legacy_base)
+                    print(f"[NR-Legacy] Co-injected T_New_{_gcode}_{_tnum:02d}"
+                          f" (legacy save compat)")
+                except Exception as _e:
+                    print(f"[NR-Legacy] Co-inject failed for "
+                          f"T_New_{_gcode}_{_tnum:02d}: {_e}")
 
             nr_ok = build_newrelease_datatable(self.pak_cache, NR_SLOT_DATA, work)
             if nr_ok:
