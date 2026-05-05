@@ -7457,6 +7457,12 @@ class VHSToolApp:
         different slot, switching genre, or clicking Build). This avoids
         a torrent of timestamp updates on every small canvas nudge or
         keystroke — we just commit once when the user is "done."
+
+        Triggers a shelf re-populate so the "Edited" badge appears
+        immediately on the affected row. Without this, callers that
+        change non-image fields (rating, rarity, rotation) would only
+        see the badge on the next natural refresh — which used to mean
+        the next image upload elsewhere.
         """
         if name and name not in self._edited_slots:
             self._edited_slots.add(name)
@@ -7467,6 +7473,8 @@ class VHSToolApp:
             if not hasattr(self, "_pending_edit_slots"):
                 self._pending_edit_slots = set()
             self._pending_edit_slots.add(name)
+        if hasattr(self, "_refresh_shelf_keep_scroll"):
+            self._refresh_shelf_keep_scroll()
 
     def _flush_pending_edit_timestamp(self):
         """Commit `last_edited_at` for any slots flagged via _mark_edited().
@@ -10485,6 +10493,14 @@ class VHSToolApp:
         # Clear all replacements (custom images)
         self.replacements.clear()
         save_replacements(self.replacements)
+        # Clear shipped/edited tracking. New slots created after this point
+        # reuse the same names (smallest-free tex_num picks 1 again on an
+        # empty list, colliding with previously-shipped T_New_Dra_001 etc.),
+        # so without clearing here the fresh entries would inherit stale
+        # "shipped" / "edited" badges from the old slots.
+        self._shipped_slots.clear()
+        save_shipped_slots(self._shipped_slots)
+        self._edited_slots = clear_edited_slots()
         # Clear cached images
         self._raw_img = None
         self._base_img = None
