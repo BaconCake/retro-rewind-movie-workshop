@@ -491,7 +491,7 @@ on specific in-game days, have standee displays, and use T_New_XXX_NN textures.
 ============================================================================="""
 
 
-TOOL_VERSION = "v1.8.2.1"  # bump this on every release
+TOOL_VERSION = "v1.8.3-dev"  # bump this on every release
 
 # Error codes for build diagnostics — shown to users for bug reports
 ERROR_CODES = {
@@ -7211,6 +7211,12 @@ class VHSToolApp:
         # Edited-since-last-build tracking (persisted to disk)
         self._edited_slots = load_edited_slots()
         self._shipped_slots = load_shipped_slots()
+        # Self-heal orphan keys left over from pre-v1.8.3 deletes (or external
+        # JSON edits): replacements/shipped/edited could reference textures
+        # that no longer exist in ALL_TEXTURES or NR_SLOT_DATA. Without this,
+        # stale keys linger forever (shipped/edited are append-only at build),
+        # causing build counter mismatches and ghost badges.
+        self._prune_orphan_tracking()
         # Per-tab sort preferences (default: created_asc / oldest first).
         # Keys are tab names: genre names like "Action", or "New Releases".
         self._sort_prefs = load_sort_prefs()
@@ -7484,6 +7490,41 @@ class VHSToolApp:
                     sliderlength=28)
         s.configure("Horizontal.TProgressbar",
                     background=C["cyan"], troughcolor=C["border"])
+
+    def _prune_orphan_tracking(self):
+        """Remove stale keys from replacements/shipped/edited that no longer
+        match a current texture or NR slot.
+
+        Pre-v1.8.3 the delete handlers only cleaned `replacements`; shipped
+        and edited sets were append-only at build time. Old saves carry the
+        leak forward — call this once at startup to heal it. Also catches
+        replacements drift from external JSON edits.
+        """
+        valid_tex = {t["name"] for t in ALL_TEXTURES}
+        valid_nr  = {f"NR_{nr['sku']}" for nr in NR_SLOT_DATA}
+        valid    = valid_tex | valid_nr
+
+        repl_orphans = [k for k in self.replacements if k not in valid]
+        if repl_orphans:
+            for k in repl_orphans:
+                del self.replacements[k]
+            save_replacements(self.replacements)
+            print(f"[Heal] Pruned {len(repl_orphans)} orphan replacement(s): "
+                  f"{repl_orphans[:5]}{'…' if len(repl_orphans) > 5 else ''}")
+
+        ship_orphans = self._shipped_slots - valid
+        if ship_orphans:
+            self._shipped_slots -= ship_orphans
+            save_shipped_slots(self._shipped_slots)
+            print(f"[Heal] Pruned {len(ship_orphans)} orphan shipped key(s): "
+                  f"{sorted(ship_orphans)[:5]}{'…' if len(ship_orphans) > 5 else ''}")
+
+        edit_orphans = self._edited_slots - valid
+        if edit_orphans:
+            self._edited_slots -= edit_orphans
+            save_edited_slots(self._edited_slots)
+            print(f"[Heal] Pruned {len(edit_orphans)} orphan edited key(s): "
+                  f"{sorted(edit_orphans)[:5]}{'…' if len(edit_orphans) > 5 else ''}")
 
     # ── Layout preload ─────────────────────────────────────────
     def _mark_edited(self, name):
@@ -9616,12 +9657,23 @@ class VHSToolApp:
         if messagebox.askyesno("Delete New Release",
                 f"Delete '{nr['title']}'?\nThis cannot be undone.",
                 icon="warning", parent=self.root):
-            # Remove the replacement for this NR's stable key
+            # Remove the replacement and tracking state for this NR's stable key.
+            # Shipped/edited sets are append-only at build time; without explicit
+            # cleanup here a deleted NR's key would survive in memory and get
+            # re-persisted on the next build (Nexus repro: deleted NR_sku
+            # reappears in shipped_slots.json after rebuild).
             stable_key = f"NR_{nr['sku']}"
             if stable_key in self.replacements:
                 del self.replacements[stable_key]
                 save_replacements(self.replacements)
                 print(f"[NR] Removed replacement for {stable_key}")
+            if stable_key in self._shipped_slots:
+                self._shipped_slots.discard(stable_key)
+                save_shipped_slots(self._shipped_slots)
+                print(f"[NR] Removed shipped tracking for {stable_key}")
+            if stable_key in self._edited_slots:
+                self._edited_slots.discard(stable_key)
+                save_edited_slots(self._edited_slots)
             remove_nr_slot(idx)
             self._selected_nr_idx = -1
             self.selected = None
@@ -10474,10 +10526,19 @@ class VHSToolApp:
                 parent=self.root)
             return
         slots.remove(slot)
-        # Remove from texture list and replacements
+        # Remove from texture list, replacements, and tracking state.
+        # Shipped/edited sets are append-only at build time; explicit cleanup
+        # here keeps deleted slots from re-persisting on the next build.
         if name in self.replacements:
             del self.replacements[name]
             save_replacements(self.replacements)
+        if name in self._shipped_slots:
+            self._shipped_slots.discard(name)
+            save_shipped_slots(self._shipped_slots)
+            print(f"[Movie] Removed shipped tracking for {name}")
+        if name in self._edited_slots:
+            self._edited_slots.discard(name)
+            save_edited_slots(self._edited_slots)
         global ALL_TEXTURES
         ALL_TEXTURES = [t for t in ALL_TEXTURES if t["name"] != name]
         save_custom_slots()
