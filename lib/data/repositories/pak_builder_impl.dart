@@ -4,17 +4,25 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../../core/constants/genres.dart';
+import '../../core/constants/new_release.dart';
 import '../../core/utils/build_error.dart';
 import '../../domain/entities/app_config.dart';
 import '../../domain/entities/build_result.dart';
+import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../../domain/repositories/pak_builder.dart';
 import '../../core/constants/tsub_template.dart';
 import '../datasources/custom_slots_data_source.dart';
+import '../datasources/nr_slots_data_source.dart';
 import '../datasources/replacements_data_source.dart';
 import '../datatable/datatable_builder.dart';
 import '../datatable/datatable_manager.dart';
+import '../datatable/newrelease_datatable_builder.dart';
 import '../datatable/slot_data.dart';
+import '../datatable/standee_blueprint_cloner.dart';
+import '../datatable/standee_mi_builder.dart';
+import '../datatable/standee_templates.dart';
+import '../datatable/standee_thumbnail_builder.dart';
 import '../services/pak_cache.dart';
 import '../services/transparent_tsub_builder.dart';
 import 'texture_injector_impl.dart';
@@ -31,6 +39,9 @@ class PakBuilderImpl implements PakBuilder {
   late final TextureInjectorImpl _injector;
   late final ReplacementsDataSource _replacementsDataSource;
   late final CustomSlotsDataSource _customSlotsDataSource;
+  late final NrSlotsDataSource _nrSlotsDataSource;
+  late final NewReleaseDataTableBuilder _nrDtBuilder;
+  late final StandeeBlueprintCloner _blueprintCloner;
   final _logController = StreamController<String>.broadcast();
 
   PakBuilderImpl(this.workingDir) : _pakCache = PakCache(workingDir) {
@@ -38,6 +49,9 @@ class PakBuilderImpl implements PakBuilder {
     _injector = TextureInjectorImpl(pakCache: _pakCache);
     _replacementsDataSource = ReplacementsDataSource(workingDir);
     _customSlotsDataSource = CustomSlotsDataSource(workingDir);
+    _nrSlotsDataSource = NrSlotsDataSource(workingDir);
+    _nrDtBuilder = NewReleaseDataTableBuilder(_pakCache);
+    _blueprintCloner = StandeeBlueprintCloner(_pakCache);
   }
 
   PakCache get pakCache => _pakCache;
@@ -135,6 +149,23 @@ class PakBuilderImpl implements PakBuilder {
     // resolves to a real asset and doesn't render as missing.
     await _writeTextures(config, workRoot.path, customSlots, replacements);
 
+    // Build NewRelease DataTable + per-NR standee assets.  Slots come from
+    // nr_custom_slots.json (loaded next to the executable, same convention
+    // as custom_slots.json).  When the file is empty, the whole NR step is
+    // skipped — the in-game New Releases shelf falls back to the base game.
+    final nrSlots = await _safeLoadNrSlots();
+    if (nrSlots.isNotEmpty) {
+      try {
+        await _writeNrAssets(config, workRoot.path, nrSlots);
+      } on NewReleaseBuildError catch (e) {
+        return _fail(e.code, 'NewRelease DT: ${e.message}');
+      } catch (e) {
+        return _fail('E004', 'NewRelease build threw: $e');
+      }
+    } else {
+      _log('No NR slots — skipping New Release DT + standees');
+    }
+
     // Inject the always-transparent T_Sub batch.  Without this the base
     // game's procedural subject artwork remains visible on top of every
     // cover.  We always emit T_Sub_01..T_Sub_77, plus any T_Sub_78+ names
@@ -213,6 +244,134 @@ class PakBuilderImpl implements PakBuilder {
       _log('Skipping custom slots: custom_slots.json unreadable ($e)');
       return const {};
     }
+  }
+
+  Future<List<NewReleaseSlot>> _safeLoadNrSlots() async {
+    try {
+      return await _nrSlotsDataSource.load();
+    } catch (e) {
+      _log('Skipping NR slots: nr_custom_slots.json unreadable ($e)');
+      return const [];
+    }
+  }
+
+  /// Build + write every NR-related asset for the given [slots]:
+  ///
+  ///   * NewRelease_Details_-_Data DataTable (1 file pair).
+  ///   * Per-slot trio: MI uasset+uexp, thumbnail uasset+uexp, blueprint
+  ///     uasset+uexp.
+  ///
+  /// All file paths live under [workRoot]/[NewReleaseBuildResult.relativePath]
+  /// with `.uasset`/`.uexp` suffixes.  Failures of individual standee assets
+  /// are logged and counted but do not abort the build — a missing standee
+  /// degrades gracefully in-game (no popup model, but the shelf still shows
+  /// the NR cover).  A failure of the NR DT itself is fatal because then
+  /// the engine has no row referencing the standee at all.
+  Future<void> _writeNrAssets(
+      AppConfig config,
+      String workRoot,
+      List<NewReleaseSlot> slots) async {
+    _log('Building NewRelease DT + standees for ${slots.length} slot(s)...');
+
+    // Apply the same filter the NR DT builder uses, so we don't try to
+    // build standee assets for slots whose row was dropped from the DT.
+    final validSlots = [
+      for (final s in slots)
+        if (kNrGenreByte.containsKey(s.genre)) s,
+    ];
+    if (validSlots.length < slots.length) {
+      _log('  NR DT: ${slots.length - validSlots.length} slot(s) filtered '
+          '(unsupported genre)');
+    }
+    if (validSlots.isEmpty) {
+      _log('  NR DT: no valid slots after filter — skipping');
+      return;
+    }
+
+    // 1) NR DataTable.
+    final dtResult = await _nrDtBuilder.build(config, validSlots);
+    if (dtResult == null) {
+      _log('  NR DT: builder returned null — skipping');
+      return;
+    }
+    final dtDir = p.join(
+        workRoot, 'RetroRewind', 'Content', 'VideoStore', 'core',
+        'blueprint', 'data');
+    await Directory(dtDir).create(recursive: true);
+    await File(p.join(dtDir, 'NewRelease_Details_-_Data.uasset'))
+        .writeAsBytes(dtResult.uassetBytes);
+    await File(p.join(dtDir, 'NewRelease_Details_-_Data.uexp'))
+        .writeAsBytes(dtResult.uexpBytes);
+    _log('  NR DT: ${dtResult.rowCount} row(s) written');
+
+    // 2) Per-slot standee assets.  Load templates once.
+    final StandeeTemplates templates;
+    try {
+      templates = await StandeeTemplates.load();
+    } catch (e) {
+      _log('  Standees SKIP all: template load failed ($e)');
+      return;
+    }
+    final miBuilder = StandeeMiBuilder(templates);
+    final thumbBuilder = StandeeThumbnailBuilder(templates, config);
+
+    var miOk = 0, thumbOk = 0, bpOk = 0, fail = 0;
+    for (final s in validSlots) {
+      // 2a) MI material instance.
+      try {
+        final mi = miBuilder.build(
+          genreCode: s.genreCode,
+          texNum: s.texNum,
+          standeeShape: s.standeeShape,
+        );
+        await _writeAssetPair(workRoot, mi.relativePath,
+            mi.uassetBytes, mi.uexpBytes);
+        miOk++;
+      } catch (e) {
+        fail++;
+        _log('  MI FAIL ${s.bkgTex}: $e');
+      }
+
+      // 2b) Thumbnail texture.
+      try {
+        final th = await thumbBuilder.build(sku: s.sku, shape: s.standeeShape);
+        await _writeAssetPair(workRoot, th.relativePath,
+            th.uassetBytes, th.uexpBytes);
+        thumbOk++;
+      } catch (e) {
+        fail++;
+        _log('  Thumb FAIL ${s.bkgTex}: $e');
+      }
+
+      // 2c) Standee mesh blueprint clone.
+      try {
+        final bp = await _blueprintCloner.clone(
+          config: config,
+          sku: s.sku,
+          standeeShape: s.standeeShape,
+          genreCode: s.genreCode,
+          texNum: s.texNum,
+        );
+        await _writeAssetPair(workRoot, bp.relativePath,
+            bp.uassetBytes, bp.uexpBytes);
+        bpOk++;
+      } catch (e) {
+        fail++;
+        _log('  Blueprint FAIL ${s.bkgTex}: $e');
+      }
+    }
+    _log('  Standees: $miOk MI, $thumbOk thumb, $bpOk blueprint '
+        '($fail failures)');
+  }
+
+  /// Write a uasset+uexp pair under [workRoot]/[relativePath].  The
+  /// directory hierarchy is created if it doesn't exist yet.
+  Future<void> _writeAssetPair(String workRoot, String relativePath,
+      List<int> uasset, List<int> uexp) async {
+    final fullPath = p.join(workRoot, relativePath.replaceAll('/', p.separator));
+    await Directory(p.dirname(fullPath)).create(recursive: true);
+    await File('$fullPath.uasset').writeAsBytes(uasset);
+    await File('$fullPath.uexp').writeAsBytes(uexp);
   }
 
   Future<void> _writeTextures(
