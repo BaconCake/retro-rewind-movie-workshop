@@ -6,8 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
+import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
+import 'add_nr_slot_dialog.dart';
 import 'add_slot_dialog.dart';
 import 'cover_image.dart';
 
@@ -28,9 +30,11 @@ class TextureGrid extends ConsumerWidget {
     final replacements = ref.watch(replacementsProvider);
 
     if (tab == 'New Releases') {
-      return const _CenteredHint(
-        title: 'NEW RELEASES',
-        body: 'Coming in slice 5 — NR support is deferred for now.',
+      final nrAsync = ref.watch(nrSlotsProvider);
+      return nrAsync.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, st) => _ErrorBanner(message: '$e'),
+        data: (slots) => _NrSlotGrid(slots: slots),
       );
     }
 
@@ -460,43 +464,196 @@ class _Placeholder extends StatelessWidget {
   }
 }
 
-class _CenteredHint extends StatelessWidget {
-  final String title;
-  final String body;
+/// NR shelf — sibling to [_SlotGrid] but driven by [nrSlotsProvider].
+/// No image thumbnails (NR covers come from base-game `T_New_*` textures
+/// at the moment; if we ever pre-decode them, this is the place to plug
+/// them in).
+class _NrSlotGrid extends ConsumerWidget {
+  final List<NewReleaseSlot> slots;
+  const _NrSlotGrid({required this.slots});
 
-  const _CenteredHint({required this.title, required this.body});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final selectedBkg = ref.watch(selectedSlotBkgProvider);
+
+    return GridView.builder(
+      padding: const EdgeInsets.all(kSp3),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 180,
+        childAspectRatio: 0.55,
+        crossAxisSpacing: kSp3,
+        mainAxisSpacing: kSp3,
+      ),
+      itemCount: slots.length + 1,
+      itemBuilder: (context, i) {
+        if (i == slots.length) {
+          return _AddNrTile(
+            onTap: () => AddNrSlotDialog.show(context),
+          );
+        }
+        final slot = slots[i];
+        final selKey = '$kNrSelectionPrefix${slot.sku}';
+        return _NrSlotCard(
+          slot: slot,
+          selected: selKey == selectedBkg,
+          onTap: () =>
+              ref.read(selectedSlotBkgProvider.notifier).state = selKey,
+        );
+      },
+    );
+  }
+}
+
+/// "+ ADD NEW RELEASE" tile — same dashed-pink-border treatment as the
+/// genre-side [_AddSlotTile], visually consistent across both shelves.
+class _AddNrTile extends StatelessWidget {
+  final VoidCallback onTap;
+  const _AddNrTile({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 360),
-        child: Padding(
-          padding: const EdgeInsets.all(kSp4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: kFsBody,
-                  fontWeight: FontWeight.w700,
-                  color: kColorText3,
-                  letterSpacing: 1.5,
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: CustomPaint(
+          painter: _DashedBorderPainter(color: kColorPink),
+          child: Container(
+            color: kColorPanel,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.all(kSp3),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.add, color: kColorPink, size: 36),
+                const SizedBox(height: kSp1),
+                const Text(
+                  'ADD NEW\nRELEASE',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: kFsMeta,
+                    fontWeight: FontWeight.w700,
+                    color: kColorPink,
+                    letterSpacing: 1.5,
+                    height: 1.2,
+                  ),
                 ),
-              ),
-              const SizedBox(height: kSp2),
-              Text(
-                body,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: kFsMeta,
-                  color: kColorText3,
-                  height: 1.4,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NrSlotCard extends StatelessWidget {
+  final NewReleaseSlot slot;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _NrSlotCard({
+    required this.slot,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor = selected ? kColorCyan : kColorBorder;
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        decoration: BoxDecoration(
+          color: kColorPanel,
+          border: Border.all(
+            color: borderColor,
+            width: selected ? 2 : 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: Container(
+                color: kColorBg,
+                alignment: Alignment.center,
+                padding: const EdgeInsets.all(kSp2),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Genre code as the dominant visual — gives the user
+                    // an instant read of which shelf this NR will land on.
+                    Text(
+                      slot.genreCode.toUpperCase(),
+                      style: const TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.w700,
+                        color: kColorCyan,
+                        letterSpacing: 2,
+                      ),
+                    ),
+                    const SizedBox(height: kSp1),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: kSp1, vertical: 2),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: kColorPink, width: 1),
+                      ),
+                      child: Text(
+                        'STANDEE ${slot.standeeShape}',
+                        style: const TextStyle(
+                          fontSize: kFsMeta,
+                          fontWeight: FontWeight.w700,
+                          color: kColorPink,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.fromLTRB(kSp2, kSp1, kSp2, kSp2),
+              decoration: const BoxDecoration(
+                color: kColorPanel,
+                border: Border(top: BorderSide(color: kColorBorder)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    slot.title.isEmpty ? '(untitled)' : slot.title,
+                    style: const TextStyle(
+                      fontSize: kFsMeta,
+                      fontWeight: FontWeight.w700,
+                      color: kColorText,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    slot.bkgTex,
+                    style: const TextStyle(
+                      fontSize: kFsMeta,
+                      color: kColorText3,
+                    ),
+                  ),
+                  Text(
+                    'SKU ${slot.sku}',
+                    style: const TextStyle(
+                      fontSize: kFsMeta,
+                      color: kColorText3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

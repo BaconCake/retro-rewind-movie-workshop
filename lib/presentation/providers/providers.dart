@@ -368,13 +368,42 @@ class NrSlotsController {
 
   /// Remove the slot whose SKU matches [sku]. No-op when the slot doesn't
   /// exist (matches Python's silent fall-through at Z. 2147-2154 when the
-  /// index is out of range).
+  /// index is out of range).  Also clears the slot's selection if it's
+  /// currently selected, so the options panel doesn't briefly point at a
+  /// vanished record.
   Future<void> removeSlot(int sku) async {
     final dir = _ref.read(workingDirProvider);
     final ds = NrSlotsDataSource(dir);
     final current = await ds.load();
     if (!current.any((s) => s.sku == sku)) return;
     final next = current.where((s) => s.sku != sku).toList();
+    await ds.save(next);
+    final selected = _ref.read(selectedSlotBkgProvider);
+    if (selected == '$kNrSelectionPrefix$sku') {
+      _ref.read(selectedSlotBkgProvider.notifier).state = null;
+    }
+    _ref.invalidate(nrSlotsProvider);
+  }
+
+  /// Replace the slot identified by `updated.sku` in place.  No-op when
+  /// no slot with that SKU exists.  Used by the options panel for title
+  /// edits, standee shape changes, and genre changes.
+  Future<void> updateSlot(NewReleaseSlot updated) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = NrSlotsDataSource(dir);
+    final current = await ds.load();
+    var found = false;
+    final next = [
+      for (final s in current)
+        if (s.sku == updated.sku)
+          (() {
+            found = true;
+            return updated;
+          })()
+        else
+          s,
+    ];
+    if (!found) return;
     await ds.save(next);
     _ref.invalidate(nrSlotsProvider);
   }
@@ -395,10 +424,21 @@ final nrSlotsControllerProvider = Provider<NrSlotsController>(
 /// (RR_VHS_Tool.py:7323).
 final selectedTabProvider = StateProvider<String>((_) => 'All Movies');
 
-/// Currently selected slot, identified by its globally-unique `bkgTex`
-/// (e.g. `"T_Bkg_Dra_001"`).  Null when no slot is picked.  Drives the
-/// preview + slot-options panels.
+/// Currently selected slot, identified by either:
+///
+///   * a genre slot's globally-unique `bkgTex` (e.g. `"T_Bkg_Dra_001"`), or
+///   * an NR slot's `nr:<sku>` handle (e.g. `"nr:51234"`).
+///
+/// NR slots can't reuse `bkgTex` for selection because multiple NRs in the
+/// same genre may share one base `T_New_<code>_<NN>` texture (Python
+/// design — see RR_VHS_Tool.py:2098-2101).  SKUs are unique across all
+/// NRs, so `nr:<sku>` is the smallest stable identifier.
+///
+/// Null when no slot is picked.  Cleared on tab switch.
 final selectedSlotBkgProvider = StateProvider<String?>((_) => null);
+
+/// Selection-key prefix for NR slots in [selectedSlotBkgProvider].
+const String kNrSelectionPrefix = 'nr:';
 
 /// Whether drag-time snapping (centre axes + safe / canvas edges) is
 /// active.  Defaults to true — Pythons `_snap_enabled` does the same

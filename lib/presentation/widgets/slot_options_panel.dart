@@ -4,8 +4,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
+import '../../core/constants/new_release.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
+import '../../domain/entities/new_release_slot.dart';
+import '../../domain/nr_slot_logic.dart';
 import '../../domain/sku.dart';
 import '../providers/providers.dart';
 import 'rarity_picker.dart';
@@ -70,6 +73,35 @@ class _SlotOptionsBody extends ConsumerWidget {
     final selectedBkg = ref.watch(selectedSlotBkgProvider);
     if (selectedBkg == null) {
       return const _EmptyOptions();
+    }
+
+    // NR slots are routed through a separate form — different fields, no
+    // texture-replacement entry, single source of truth is nrSlotsProvider.
+    if (selectedBkg.startsWith(kNrSelectionPrefix)) {
+      final sku =
+          int.tryParse(selectedBkg.substring(kNrSelectionPrefix.length));
+      if (sku == null) return const _EmptyOptions();
+      final nrAsync = ref.watch(nrSlotsProvider);
+      return nrAsync.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => _EmptyOptions(error: '$e'),
+        data: (slots) {
+          NewReleaseSlot? nr;
+          for (final s in slots) {
+            if (s.sku == sku) {
+              nr = s;
+              break;
+            }
+          }
+          if (nr == null) return const _EmptyOptions();
+          return SingleChildScrollView(
+            child: KeyedSubtree(
+              key: ValueKey('nr-form-${nr.sku}'),
+              child: _NrSlotForm(slot: nr, allSlots: slots),
+            ),
+          );
+        },
+      );
     }
 
     final slots = ref.watch(customSlotsProvider).maybeWhen(
@@ -486,15 +518,19 @@ class _FieldShell extends StatelessWidget {
 }
 
 class _EmptyOptions extends StatelessWidget {
-  const _EmptyOptions();
+  final String? error;
+  const _EmptyOptions({this.error});
 
   @override
   Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: kSp3),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: kSp3),
       child: Text(
-        '(select a slot to see its options)',
-        style: TextStyle(fontSize: kFsMeta, color: kColorText3),
+        error ?? '(select a slot to see its options)',
+        style: TextStyle(
+          fontSize: kFsMeta,
+          color: error != null ? kColorPink : kColorText3,
+        ),
       ),
     );
   }
@@ -730,5 +766,283 @@ class _BuildSection extends ConsumerWidget {
       return kColorCyan;
     }
     return kColorText2;
+  }
+}
+
+/// New Release editor — title, genre button-grid, standee shape A/B/C,
+/// delete.  Mirrors Python's NR controls frame (RR_VHS_Tool.py:9197-9311).
+///
+/// Edits commit immediately to `nr_custom_slots.json` via [NrSlotsController].
+/// Genre changes go through [changeNrSlotGenre] so `texNum` and `bkgTex`
+/// stay consistent with the new genre's available T_New textures.
+class _NrSlotForm extends ConsumerWidget {
+  final NewReleaseSlot slot;
+  final List<NewReleaseSlot> allSlots;
+
+  const _NrSlotForm({required this.slot, required this.allSlots});
+
+  Future<void> _commitTitle(WidgetRef ref, String v) async {
+    if (v == slot.title) return;
+    await ref
+        .read(nrSlotsControllerProvider)
+        .updateSlot(slot.copyWith(title: v));
+  }
+
+  Future<void> _setStandee(WidgetRef ref, String shape) async {
+    if (shape == slot.standeeShape) return;
+    await ref
+        .read(nrSlotsControllerProvider)
+        .updateSlot(slot.copyWith(standeeShape: shape));
+  }
+
+  Future<void> _setGenre(BuildContext context, WidgetRef ref,
+      String newGenre) async {
+    if (newGenre == slot.genre) return;
+    final updated = changeNrSlotGenre(
+      slot: slot,
+      newGenre: newGenre,
+      allSlots: allSlots,
+    );
+    if (updated == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: kColorPanel,
+          content: Text("Cannot change to '$newGenre' — not NR-eligible.",
+              style: const TextStyle(color: kColorPink)),
+        ));
+      }
+      return;
+    }
+    await ref.read(nrSlotsControllerProvider).updateSlot(updated);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SlotTextField(
+          label: 'Title',
+          initialValue: slot.title,
+          onCommit: (v) => _commitTitle(ref, v),
+        ),
+        _OptionRow(label: 'Texture', value: slot.bkgTex),
+        const SizedBox(height: kSp2),
+        const _SubHeader('GENRE'),
+        const SizedBox(height: kSp1),
+        _NrGenreGrid(
+          current: slot.genre,
+          onPick: (g) => _setGenre(context, ref, g),
+        ),
+        const SizedBox(height: kSp3),
+        const _SubHeader('STANDEE SHAPE'),
+        const SizedBox(height: kSp1),
+        _NrStandeePicker(
+          current: slot.standeeShape,
+          onPick: (s) => _setStandee(ref, s),
+        ),
+        const SizedBox(height: kSp3),
+        const _SubHeader('CATALOG ID'),
+        const SizedBox(height: kSp1),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${slot.sku}',
+                style: const TextStyle(fontSize: kFsBody, color: kColorText),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Copy catalog ID',
+              visualDensity: VisualDensity.compact,
+              color: kColorText2,
+              icon: const Icon(Icons.content_copy, size: 14),
+              onPressed: () async {
+                await Clipboard.setData(
+                    ClipboardData(text: '${slot.sku}'));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Catalog ID copied'),
+                    duration: Duration(seconds: 1),
+                  ));
+                }
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: kSp4),
+        _DeleteNrLink(slot: slot),
+      ],
+    );
+  }
+}
+
+/// Button grid of NR-eligible genres.  Selected genre is filled cyan;
+/// others use the panel surface.  Mirrors Python's
+/// `_update_nr_genre_btns` (RR_VHS_Tool.py:9215-9222).
+class _NrGenreGrid extends StatelessWidget {
+  final String current;
+  final ValueChanged<String> onPick;
+
+  const _NrGenreGrid({required this.current, required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: kSp1,
+      runSpacing: kSp1,
+      children: [
+        for (final g in kNrGenres)
+          _NrPickerButton(
+            label: g,
+            selected: g == current,
+            onTap: () => onPick(g),
+          ),
+      ],
+    );
+  }
+}
+
+/// A/B/C standee-shape picker.  Square buttons, single-letter labels.
+/// Mirrors Python's `_set_standee` segmented buttons (RR_VHS_Tool.py:9296).
+class _NrStandeePicker extends StatelessWidget {
+  final String current;
+  final ValueChanged<String> onPick;
+
+  const _NrStandeePicker({required this.current, required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        for (final s in kNrStandeeShapes) ...[
+          _NrPickerButton(
+            label: s,
+            selected: s == current,
+            onTap: () => onPick(s),
+            minWidth: 44,
+          ),
+          if (s != kNrStandeeShapes.last) const SizedBox(width: kSp1),
+        ],
+      ],
+    );
+  }
+}
+
+class _NrPickerButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final double minWidth;
+
+  const _NrPickerButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.minWidth = 0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        constraints: BoxConstraints(minWidth: minWidth),
+        padding: const EdgeInsets.symmetric(
+            horizontal: kSp2, vertical: kSp1),
+        decoration: BoxDecoration(
+          color: selected ? kColorCyan : kColorPanel,
+          border: Border.all(
+            color: selected ? kColorCyan : kColorBorder,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: kFsMeta,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+            color: selected ? kColorTextInv : kColorText,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Delete link for NR slots — same visual treatment as [_DeleteSlotLink],
+/// different controller call.
+class _DeleteNrLink extends ConsumerStatefulWidget {
+  final NewReleaseSlot slot;
+  const _DeleteNrLink({required this.slot});
+
+  @override
+  ConsumerState<_DeleteNrLink> createState() => _DeleteNrLinkState();
+}
+
+class _DeleteNrLinkState extends ConsumerState<_DeleteNrLink> {
+  bool _hover = false;
+
+  Future<void> _confirmAndDelete() async {
+    final title =
+        widget.slot.title.isEmpty ? widget.slot.bkgTex : widget.slot.title;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: kColorPanel,
+        shape: const RoundedRectangleBorder(),
+        title: const Text('Delete New Release'),
+        content: Text(
+          'Delete "$title"?\nThis cannot be undone.',
+          style: const TextStyle(color: kColorText),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('CANCEL'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: kColorPink,
+              foregroundColor: kColorTextInv,
+              shape: const RoundedRectangleBorder(),
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('DELETE'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ref.read(nrSlotsControllerProvider).removeSlot(widget.slot.sku);
+    // removeSlot already clears the selection if the deleted slot was
+    // the selected one.
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: _confirmAndDelete,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          alignment: Alignment.center,
+          child: Text(
+            'Delete this New Release',
+            style: TextStyle(
+              fontSize: kFsMeta,
+              color:
+                  _hover ? const Color(0xFFFF6666) : const Color(0xFF994444),
+              decoration: _hover ? TextDecoration.underline : null,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

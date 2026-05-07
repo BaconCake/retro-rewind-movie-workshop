@@ -196,6 +196,94 @@ void main() {
     });
   });
 
+  group('changeNrSlotGenre', () {
+    test('returns null for unsupported genre', () {
+      final s = _slot(genre: 'Drama', texNum: 1);
+      expect(
+        changeNrSlotGenre(slot: s, newGenre: 'Adventure', allSlots: [s]),
+        isNull,
+      );
+    });
+
+    test('updates genre/code/byte/texNum/bkgTex on a normal switch', () {
+      final s = _slot(genre: 'Drama', texNum: 1);
+      final next = changeNrSlotGenre(
+        slot: s,
+        newGenre: 'Horror',
+        allSlots: [s],
+      );
+      expect(next, isNotNull);
+      expect(next!.genre, 'Horror');
+      expect(next.genreCode, 'Hor');
+      expect(next.genreByte, kNrGenreByte['Horror']);
+      expect(next.texNum, 1);
+      expect(next.bkgTex, 'T_New_Hor_01');
+      expect(next.sku, s.sku, reason: 'SKU must be preserved');
+    });
+
+    test('skips this slot when computing texNum collisions', () {
+      // Slot is currently Drama tex=2; switching to Drama again should not
+      // wrap because we exclude this slot from the used set.
+      final s = _slot(genre: 'Drama', texNum: 2, sku: 50001);
+      final other = _slot(genre: 'Drama', texNum: 1, sku: 50002);
+      final next = changeNrSlotGenre(
+        slot: s,
+        newGenre: 'Drama',
+        allSlots: [s, other],
+      );
+      // tex_num=1 is used by other; lowest unused for Drama (newCount=3) is 2.
+      expect(next!.texNum, 2);
+    });
+
+    test('lowest-unused texNum honours other slots in target genre', () {
+      // Slot is Drama; switching to Horror where tex 1, 2 are taken.
+      final s = _slot(genre: 'Drama', texNum: 1, sku: 50001);
+      final h1 = _slot(genre: 'Horror', texNum: 1, sku: 50002);
+      final h2 = _slot(genre: 'Horror', texNum: 2, sku: 50003);
+      final next = changeNrSlotGenre(
+        slot: s,
+        newGenre: 'Horror',
+        allSlots: [s, h1, h2],
+      );
+      expect(next!.texNum, 3);
+    });
+
+    test('wraps via count-mod when every base slot in target genre is used',
+        () {
+      // Horror has newCount=4. Fill 1..4 with other slots, then move our
+      // slot to Horror — should wrap to (4 % 4) + 1 = 1.
+      final s = _slot(genre: 'Drama', texNum: 1, sku: 50001);
+      final fillers = [
+        for (var i = 0; i < 4; i++)
+          _slot(genre: 'Horror', texNum: i + 1, sku: 50100 + i),
+      ];
+      final next = changeNrSlotGenre(
+        slot: s,
+        newGenre: 'Horror',
+        allSlots: [s, ...fillers],
+      );
+      expect(next!.texNum, 1);
+    });
+
+    test('keeps texNum/bkgTex when target genre has newCount=0', () {
+      // Romance has no T_New textures; Python returns early without
+      // touching tex_num/bkg_tex (Z. 9237-9238). We do the same.
+      final s = _slot(genre: 'Drama', texNum: 2, sku: 50001);
+      final next = changeNrSlotGenre(
+        slot: s,
+        newGenre: 'Romance',
+        allSlots: [s],
+      );
+      expect(next!.genre, 'Romance');
+      expect(next.genreCode, 'Rom');
+      expect(next.genreByte, kNrGenreByte['Romance']);
+      expect(next.texNum, 2);
+      expect(next.bkgTex, s.bkgTex,
+          reason: 'no T_New textures → DT builder will drop this slot, '
+              'so changing the bkg_tex preview would be misleading');
+    });
+  });
+
   group('applyGenreByteAutoFix', () {
     test('returns input unchanged when all bytes match', () {
       final input = [

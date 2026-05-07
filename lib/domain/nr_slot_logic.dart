@@ -111,6 +111,67 @@ AddNrResult addNrSlot({
   ));
 }
 
+/// Re-target [slot] at [newGenre], preserving its SKU but recomputing
+/// `genreCode`, `genreByte`, `texNum`, and `bkgTex`.  Pure port of
+/// Python's `_on_nr_genre_change` (RR_VHS_Tool.py:9224-9254).
+///
+/// `texNum` picks the lowest unused base slot for [newGenre] across
+/// [allSlots] **excluding** [slot] itself; if every base slot is in use,
+/// it wraps with `(count % base_new_count) + 1` so multiple NRs share a
+/// texture (matching the add-side behavior in [addNrSlot]).
+///
+/// Returns null when [newGenre] isn't in [kNrGenreByte] — caller should
+/// reject the change.  When [newGenre] has `newCount == 0` (Romance,
+/// Western), the slot's genre/code/byte are updated but `texNum`/`bkgTex`
+/// are kept — Python's behavior for that edge case (Z. 9237-9238).
+NewReleaseSlot? changeNrSlotGenre({
+  required NewReleaseSlot slot,
+  required String newGenre,
+  required List<NewReleaseSlot> allSlots,
+}) {
+  final genreByte = kNrGenreByte[newGenre];
+  if (genreByte == null) return null;
+
+  final genreInfo = kGenres.firstWhere((g) => g.name == newGenre);
+  final code = genreInfo.code;
+  final baseNewCount = genreInfo.newCount;
+
+  // Python returns from _on_nr_genre_change before touching tex_num when
+  // base_new_count == 0 (Z. 9237-9238).  We mirror that — the slot keeps
+  // its old tex_num/bkg_tex, which the DT builder will then drop at build
+  // time (Romance/Western have no T_New textures).
+  if (baseNewCount == 0) {
+    return slot.copyWith(
+      genre: newGenre,
+      genreCode: code,
+      genreByte: genreByte,
+    );
+  }
+
+  final usedTexNums = {
+    for (final s in allSlots)
+      if (s.sku != slot.sku && s.genre == newGenre) s.texNum,
+  };
+  int? texNum;
+  for (var n = 1; n <= baseNewCount; n++) {
+    if (!usedTexNums.contains(n)) {
+      texNum = n;
+      break;
+    }
+  }
+  texNum ??= (usedTexNums.length % baseNewCount) + 1;
+
+  final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(2, '0')}';
+
+  return slot.copyWith(
+    genre: newGenre,
+    genreCode: code,
+    genreByte: genreByte,
+    texNum: texNum,
+    bkgTex: bkgTex,
+  );
+}
+
 /// Apply the genre_byte auto-fix Python performs on load (Z. 2055-2067).
 /// Returns the corrected list and the count of slots whose `genreByte`
 /// disagreed with [kNrGenreByte].  Caller decides whether to re-persist.

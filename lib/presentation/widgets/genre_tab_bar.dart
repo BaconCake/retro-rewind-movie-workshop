@@ -28,6 +28,10 @@ class GenreTabBar extends ConsumerWidget {
           data: (m) => {for (final e in m.entries) e.key: e.value.length},
           orElse: () => const <String, int>{},
         );
+    final nrCount = ref.watch(nrSlotsProvider).maybeWhen(
+          data: (slots) => slots.length,
+          orElse: () => 0,
+        );
 
     final allCount = counts.values.fold<int>(0, (a, b) => a + b);
 
@@ -37,7 +41,7 @@ class GenreTabBar extends ConsumerWidget {
             label: g.name,
             count: counts[g.dataTableName] ?? 0,
           )),
-      const _TabSpec(label: _newReleases, count: 0),
+      _TabSpec(label: _newReleases, count: nrCount),
     ];
 
     return Container(
