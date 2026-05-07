@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../../core/constants/genres.dart';
 import '../../data/datasources/custom_slots_data_source.dart';
 import '../../data/datasources/json_file_data_source.dart';
+import '../../data/datasources/nr_slots_data_source.dart';
 import '../../data/datasources/replacements_data_source.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../data/repositories/config_repository_impl.dart';
@@ -16,8 +17,10 @@ import '../../data/services/layout_preloader.dart';
 import '../../data/services/pak_cache.dart';
 import '../../domain/custom_slot_naming.dart';
 import '../../domain/entities/app_config.dart';
+import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture.dart';
 import '../../domain/entities/texture_replacement.dart';
+import '../../domain/nr_slot_logic.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
 import '../../domain/repositories/texture_repository.dart';
@@ -316,6 +319,69 @@ class SlotsController {
 
 final slotsControllerProvider = Provider<SlotsController>(
   (ref) => SlotsController(ref),
+);
+
+/// New Release slots from `nr_custom_slots.json`. Applies the genre_byte
+/// auto-fix on load (Python Z. 2055-2067) and re-persists when any slot
+/// was corrected, so a stale byte gets healed at the next launch instead
+/// of waiting for the user to edit the file.
+final nrSlotsProvider = FutureProvider<List<NewReleaseSlot>>((ref) async {
+  final dir = ref.watch(workingDirProvider);
+  final ds = NrSlotsDataSource(dir);
+  final raw = await ds.load();
+  final fixed = applyGenreByteAutoFix(raw);
+  if (fixed.fixed > 0) {
+    await ds.save(fixed.slots);
+  }
+  return fixed.slots;
+});
+
+/// Mutator for `nr_custom_slots.json`.  Same load → mutate → save →
+/// invalidate pattern as [SlotsController].  NR slots are uniquely
+/// identified by SKU (titles can collide; tex_num + genre may share).
+class NrSlotsController {
+  final Ref _ref;
+  NrSlotsController(this._ref);
+
+  /// Append a new NR slot. Returns the result so the UI can show the
+  /// specific reason on failure (unsupported genre, per-genre cap, etc.).
+  Future<AddNrResult> addSlot({
+    required String genre,
+    String title = 'New Release',
+    String standeeShape = 'A',
+  }) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = NrSlotsDataSource(dir);
+    final current = await ds.load();
+    final result = addNrSlot(
+      genre: genre,
+      existing: current,
+      title: title,
+      standeeShape: standeeShape,
+    );
+    if (!result.isOk) return result;
+    final next = [...current, result.slot!];
+    await ds.save(next);
+    _ref.invalidate(nrSlotsProvider);
+    return result;
+  }
+
+  /// Remove the slot whose SKU matches [sku]. No-op when the slot doesn't
+  /// exist (matches Python's silent fall-through at Z. 2147-2154 when the
+  /// index is out of range).
+  Future<void> removeSlot(int sku) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = NrSlotsDataSource(dir);
+    final current = await ds.load();
+    if (!current.any((s) => s.sku == sku)) return;
+    final next = current.where((s) => s.sku != sku).toList();
+    await ds.save(next);
+    _ref.invalidate(nrSlotsProvider);
+  }
+}
+
+final nrSlotsControllerProvider = Provider<NrSlotsController>(
+  (ref) => NrSlotsController(ref),
 );
 
 /// Identifier of the currently selected genre tab.

@@ -11,30 +11,36 @@ class GenreInfo {
   final String name;
   final String code;
   final int bkgCount;
+  /// Number of base game `T_New_<code>_NN` textures for this genre — the
+  /// `"new":` field in Python's GENRES dict (RR_VHS_Tool.py:1937-1949).
+  /// 0 means the genre ships no NR textures; the New Release builder still
+  /// allows the slot but warns at build time.
+  final int newCount;
   final String dataTableName;
 
   const GenreInfo({
     required this.name,
     required this.code,
     required this.bkgCount,
+    required this.newCount,
     required this.dataTableName,
   });
 }
 
 const List<GenreInfo> kGenres = [
-  GenreInfo(name: 'Action',    code: 'Act', bkgCount: 15, dataTableName: 'Action'),
-  GenreInfo(name: 'Adult',     code: 'Adu', bkgCount: 18, dataTableName: 'Adult'),
-  GenreInfo(name: 'Adventure', code: 'Adv', bkgCount: 3,  dataTableName: 'Adventure'),
-  GenreInfo(name: 'Comedy',    code: 'Com', bkgCount: 12, dataTableName: 'Comedy'),
-  GenreInfo(name: 'Drama',     code: 'Dra', bkgCount: 19, dataTableName: 'Drama'),
-  GenreInfo(name: 'Fantasy',   code: 'Fan', bkgCount: 11, dataTableName: 'Fantasy'),
-  GenreInfo(name: 'Horror',    code: 'Hor', bkgCount: 22, dataTableName: 'Horror'),
-  GenreInfo(name: 'Kids',      code: 'Kid', bkgCount: 11, dataTableName: 'Kid'),
-  GenreInfo(name: 'Police',    code: 'Pol', bkgCount: 13, dataTableName: 'Police'),
-  GenreInfo(name: 'Romance',   code: 'Rom', bkgCount: 14, dataTableName: 'Romance'),
-  GenreInfo(name: 'Sci-Fi',    code: 'Sci', bkgCount: 18, dataTableName: 'Sci-Fi'),
-  GenreInfo(name: 'Western',   code: 'Wst', bkgCount: 10, dataTableName: 'Western'),
-  GenreInfo(name: 'Xmas',      code: 'Xma', bkgCount: 12, dataTableName: 'Xmas'),
+  GenreInfo(name: 'Action',    code: 'Act', bkgCount: 15, newCount: 3, dataTableName: 'Action'),
+  GenreInfo(name: 'Adult',     code: 'Adu', bkgCount: 18, newCount: 0, dataTableName: 'Adult'),
+  GenreInfo(name: 'Adventure', code: 'Adv', bkgCount: 3,  newCount: 0, dataTableName: 'Adventure'),
+  GenreInfo(name: 'Comedy',    code: 'Com', bkgCount: 12, newCount: 1, dataTableName: 'Comedy'),
+  GenreInfo(name: 'Drama',     code: 'Dra', bkgCount: 19, newCount: 3, dataTableName: 'Drama'),
+  GenreInfo(name: 'Fantasy',   code: 'Fan', bkgCount: 11, newCount: 2, dataTableName: 'Fantasy'),
+  GenreInfo(name: 'Horror',    code: 'Hor', bkgCount: 22, newCount: 4, dataTableName: 'Horror'),
+  GenreInfo(name: 'Kids',      code: 'Kid', bkgCount: 11, newCount: 1, dataTableName: 'Kid'),
+  GenreInfo(name: 'Police',    code: 'Pol', bkgCount: 13, newCount: 1, dataTableName: 'Police'),
+  GenreInfo(name: 'Romance',   code: 'Rom', bkgCount: 14, newCount: 0, dataTableName: 'Romance'),
+  GenreInfo(name: 'Sci-Fi',    code: 'Sci', bkgCount: 18, newCount: 4, dataTableName: 'Sci-Fi'),
+  GenreInfo(name: 'Western',   code: 'Wst', bkgCount: 10, newCount: 0, dataTableName: 'Western'),
+  GenreInfo(name: 'Xmas',      code: 'Xma', bkgCount: 12, newCount: 1, dataTableName: 'Xmas'),
 ];
 
 /// Texture dimensions, DXT1 compressed (RR_VHS_Tool.py:283, 312).
