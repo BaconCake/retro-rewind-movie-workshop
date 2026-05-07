@@ -27,6 +27,12 @@ class HomePage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Kick off the layout-texture preload as soon as the app paints, so
+    // the work happens in the background while the user navigates instead
+    // of being deferred until they open a slot.  We intentionally don't
+    // surface its AsyncValue here — failures degrade silently to
+    // placeholder thumbnails inside LayoutStylePicker.
+    ref.watch(layoutPreloadProvider);
     return Scaffold(
       appBar: AppBar(
         title: const _Wordmark(),

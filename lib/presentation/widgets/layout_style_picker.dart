@@ -297,7 +297,7 @@ class _DiceButtonState extends State<_DiceButton> {
   }
 }
 
-class _LayoutCard extends StatelessWidget {
+class _LayoutCard extends ConsumerWidget {
   final int value;
   final bool active;
   final String workingDir;
@@ -314,7 +314,14 @@ class _LayoutCard extends StatelessWidget {
   static const _cardH = 82.0;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Watching the preload provider here gives the cards an automatic
+    // rebuild when first-run extraction finishes — without it the cards
+    // would stay on placeholders until something else (a layout-change,
+    // navigation, etc.) re-mounts them.  The provider is also watched
+    // eagerly from HomePage so the work has already started by the time
+    // the user opens a slot.
+    ref.watch(layoutPreloadProvider);
     final path = p.join(
       workingDir,
       'layout_cache',

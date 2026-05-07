@@ -12,6 +12,8 @@ import '../../data/repositories/config_repository_impl.dart';
 import '../../data/repositories/pak_builder_impl.dart';
 import '../../data/repositories/texture_repository_impl.dart';
 import '../../data/services/cover_actions.dart';
+import '../../data/services/layout_preloader.dart';
+import '../../data/services/pak_cache.dart';
 import '../../domain/custom_slot_naming.dart';
 import '../../domain/entities/app_config.dart';
 import '../../domain/entities/texture.dart';
@@ -58,6 +60,35 @@ final pakBuilderProvider = Provider<PakBuilder>((ref) {
 
 final configFutureProvider = FutureProvider<AppConfig>((ref) {
   return ref.watch(configRepositoryProvider).load();
+});
+
+/// Shared [PakCache] instance keyed off the working directory.  Threading
+/// it through Riverpod (instead of constructing per-call) lets the layout
+/// preload, AssetRegistry extraction, and future PakCache callers share
+/// the same `<workingDir>/.pak_cache/` extraction roots.
+final pakCacheProvider = Provider<PakCache>((ref) {
+  return PakCache(ref.watch(workingDirProvider));
+});
+
+/// Slice 4f: pre-decode the 5 base-game `T_Layout_NN_bc.ubulk` textures
+/// into PNGs in `<workingDir>/layout_cache/` so [LayoutStylePicker]'s
+/// thumbnail cards have real artwork to render.  Pure port of
+/// `_start_layout_preload` (RR_VHS_Tool.py:7202-7241).
+///
+/// First run pays a few seconds for repak unpack + DXT1 decode + PNG
+/// encode; subsequent runs are instant cache hits.  Failures are
+/// swallowed per-layout — cards fall back to numbered placeholders for
+/// any layout we couldn't decode (typically when the user hasn't set
+/// `base_game_pak` yet).
+///
+/// Watched eagerly from [HomePage] so the preload kicks off at app start
+/// instead of waiting until the user opens a slot.  Re-watched by
+/// [LayoutStylePicker] so its cards rebuild when the PNGs land.
+final layoutPreloadProvider =
+    FutureProvider<LayoutPreloadResult>((ref) async {
+  final config = await ref.watch(configFutureProvider.future);
+  final cache = ref.watch(pakCacheProvider);
+  return preloadLayoutTextures(cache, config);
 });
 
 final texturesProvider = Provider<List<Texture>>((ref) {
