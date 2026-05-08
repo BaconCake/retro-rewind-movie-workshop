@@ -21,6 +21,7 @@ Thumbs.db
 config.json
 build_work/
 .pak_cache/
+.tex_cache/
 zzzzzz_MovieWorkshop_P.pak
 build_last.log
 replacements.json

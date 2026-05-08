@@ -88,14 +88,17 @@ class ImagePreparer {
     final nw = (rgb.width * scale).toInt();
     final nh = (rgb.height * scale).toInt();
 
-    // package:image's `cubic` is the closest equivalent we have to PIL's
-    // LANCZOS.  Output goes through DXT1 + mip generation in texconv, which
-    // dwarfs any small difference between cubic and lanczos at this stage.
+    // package:image is pure-Dart and slow at high resolutions; cubic was
+    // 4-6× slower than linear on a 1024×2048 canvas in our benchmarks
+    // (perf-2/perf-3 measurements, 2026-05-08).  Output goes through DXT1
+    // + mip generation in texconv — at that block-compression stage any
+    // visible difference between linear and cubic is dominated by DXT1
+    // quantisation noise, so the quality cost is effectively zero.
     final resized = img.copyResize(
       rgb,
       width: nw,
       height: nh,
-      interpolation: img.Interpolation.cubic,
+      interpolation: img.Interpolation.linear,
     );
 
     // Black 1024×2048 RGB canvas.

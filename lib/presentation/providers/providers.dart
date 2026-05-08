@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -510,6 +511,12 @@ class BuildState {
   final String? lastErrorMessage;
   final int? lastPakSizeBytes;
   final String? lastInstalledPath;
+  /// Wall-clock time of the most recent build attempt (success or failure),
+  /// or null if no build has run yet.  Used by the UI to show "built in
+  /// X.Ys" alongside the success banner.
+  final int? lastBuildElapsedMs;
+  /// Live progress while [isRunning] is true.  null when idle.
+  final BuildProgress? progress;
 
   const BuildState({
     this.isRunning = false,
@@ -518,7 +525,15 @@ class BuildState {
     this.lastErrorMessage,
     this.lastPakSizeBytes,
     this.lastInstalledPath,
+    this.lastBuildElapsedMs,
+    this.progress,
   });
+
+  /// Most recent build was a clean success (the pak was built and we have
+  /// no error).  install path being null is fine here — it just means the
+  /// user hasn't configured `mods_folder`.
+  bool get lastBuildSucceeded =>
+      lastErrorCode == null && lastPakSizeBytes != null;
 
   BuildState copyWith({
     bool? isRunning,
@@ -527,6 +542,9 @@ class BuildState {
     String? lastErrorMessage,
     int? lastPakSizeBytes,
     String? lastInstalledPath,
+    int? lastBuildElapsedMs,
+    BuildProgress? progress,
+    bool clearProgress = false,
   }) {
     return BuildState(
       isRunning: isRunning ?? this.isRunning,
@@ -535,6 +553,8 @@ class BuildState {
       lastErrorMessage: lastErrorMessage ?? this.lastErrorMessage,
       lastPakSizeBytes: lastPakSizeBytes ?? this.lastPakSizeBytes,
       lastInstalledPath: lastInstalledPath ?? this.lastInstalledPath,
+      lastBuildElapsedMs: lastBuildElapsedMs ?? this.lastBuildElapsedMs,
+      progress: clearProgress ? null : (progress ?? this.progress),
     );
   }
 }
@@ -542,12 +562,32 @@ class BuildState {
 class BuildController extends StateNotifier<BuildState> {
   final Ref _ref;
   IOSink? _logSink;
+  final List<String> _pendingLog = [];
+  Timer? _flushTimer;
 
   BuildController(this._ref) : super(const BuildState()) {
-    _ref.read(pakBuilderProvider).logStream.listen((line) {
-      state = state.copyWith(log: [...state.log, line]);
+    final builder = _ref.read(pakBuilderProvider);
+    builder.logStream.listen((line) {
+      // Sink the line synchronously so build_last.log is always complete
+      // even if the UI batches.  But coalesce UI state updates: a build
+      // emits ~100-300 log lines, and rebuilding the ListView per-line
+      // (with O(n) list cloning) makes the panel stutter and the spinner
+      // freeze.  Flush pending lines into state every 100 ms.
+      _pendingLog.add(line);
       _logSink?.writeln(line);
+      _flushTimer ??=
+          Timer(const Duration(milliseconds: 100), _flushPendingLog);
     });
+    builder.progressStream.listen((p) {
+      state = state.copyWith(progress: p);
+    });
+  }
+
+  void _flushPendingLog() {
+    _flushTimer = null;
+    if (_pendingLog.isEmpty) return;
+    state = state.copyWith(log: [...state.log, ..._pendingLog]);
+    _pendingLog.clear();
   }
 
   /// Persistent path of the most recent build log.  Truncated on each `ship()`
@@ -571,9 +611,17 @@ class BuildController extends StateNotifier<BuildState> {
       _logSink = null; // best-effort; the in-memory log still works
     }
 
+    final sw = Stopwatch()..start();
     try {
       final config = await _ref.read(configRepositoryProvider).load();
       final result = await _ref.read(pakBuilderProvider).build(config);
+      sw.stop();
+
+      // Flush any pending log batches synchronously so the build
+      // summary table shows up immediately when the spinner stops.
+      _flushTimer?.cancel();
+      _flushTimer = null;
+      _flushPendingLog();
 
       state = state.copyWith(
         isRunning: false,
@@ -581,12 +629,20 @@ class BuildController extends StateNotifier<BuildState> {
         lastErrorMessage: result.errorMessage,
         lastPakSizeBytes: result.pakSizeBytes,
         lastInstalledPath: result.installedPath,
+        lastBuildElapsedMs: sw.elapsedMilliseconds,
+        clearProgress: true,
       );
     } finally {
       await _logSink?.flush();
       await _logSink?.close();
       _logSink = null;
     }
+  }
+
+  @override
+  void dispose() {
+    _flushTimer?.cancel();
+    super.dispose();
   }
 }
 

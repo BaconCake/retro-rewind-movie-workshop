@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -79,84 +81,120 @@ class TextureInjectorImpl implements TextureInjector {
     final horBaseDir = await _maybeExtractHorForCrossGenre(
         config, isNewRelease, genreCode);
 
-    final tmpDir = await Directory.systemTemp
-        .createTemp('rr_inject_${textureName}_');
-    try {
-      // 1. Resize / pad the user image onto a 1024×2048 PNG.
-      final preparedPng = p.join(tmpDir.path, '$textureName.png');
-      await imagePreparer.prepare(
-        inputPath: replacement.path,
-        outputPath: preparedPng,
-        offsetX: replacement.offsetX,
-        offsetY: replacement.offsetY,
-        zoom: replacement.zoom,
-        fit: isNewRelease ? CanvasFit.fullCanvas : CanvasFit.bkg,
-      );
+    // 1+2. Get the DDS bytes for this slot — either from the on-disk cache
+    // (skips prepare+texconv when source image + crop params haven't
+    // changed since last build) or by running the full pipeline.
+    final ddsBytes = await _ddsForReplacement(
+      config: config,
+      textureName: textureName,
+      replacement: replacement,
+      isNewRelease: isNewRelease,
+    );
 
-      // 2. texconv → DDS in the same tmp folder.  Argv must match Python
-      // (RR_VHS_Tool.py:5621-5622) so output bytes line up byte-for-byte.
-      final args = texconvArgs(
-          texconv: config.texconv, tmpDir: tmpDir.path, inputPng: preparedPng);
-      final r = await Process.run(args[0], args.sublist(1));
-      if (r.exitCode != 0) {
-        final stderr = (r.stderr ?? '').toString().trim();
-        throw StateError('texconv failed: $stderr');
-      }
-
-      final ddsPath = p.join(tmpDir.path, '$textureName.dds');
-      final ddsFile = File(ddsPath);
-      if (!await ddsFile.exists()) {
-        throw const FileSystemException(
-            'texconv reported success but produced no DDS file');
-      }
-      final ddsBytes = await ddsFile.readAsBytes();
-
-      // 3. Read base uasset (or clone from a preceding base slot for custom
-      //    3-digit names) and base uexp (or fall back to the empty template).
-      //    Mirrors RR_VHS_Tool.py:5670-5740.
-      final dstSlotNum = _slotNumberFromName(textureName);
-      if (dstSlotNum == null) {
-        throw FormatException(
-            'Could not parse slot number from $textureName');
-      }
-      final baseUasset = await _resolveUasset(
-          baseDir: baseDir,
-          horBaseDir: horBaseDir,
-          textureName: textureName,
-          genreCode: genreCode,
-          dstSlotNum: dstSlotNum,
-          isNewRelease: isNewRelease);
-
-      final baseUexp = await _resolveUexp(
-          baseDir: baseDir,
-          horBaseDir: horBaseDir,
-          textureName: textureName,
-          dstSlotNum: dstSlotNum,
-          isNewRelease: isNewRelease);
-
-      final artifacts = composeArtifacts(
-        ddsBytes: ddsBytes,
-        baseUexp: baseUexp,
-        baseUasset: baseUasset,
-      );
-
-      // 4. Write outputs into the new pak's mirror folder.
-      final destDir = Directory(p.join(workRoot, 'RetroRewind', 'Content',
-          'VideoStore', 'asset', 'prop', 'vhs', 'Background', folder));
-      await destDir.create(recursive: true);
-      await Future.wait([
-        File(p.join(destDir.path, '$textureName.uasset'))
-            .writeAsBytes(artifacts.uasset),
-        File(p.join(destDir.path, '$textureName.uexp'))
-            .writeAsBytes(artifacts.uexp),
-        File(p.join(destDir.path, '$textureName.ubulk'))
-            .writeAsBytes(artifacts.ubulk),
-      ]);
-    } finally {
-      try {
-        await tmpDir.delete(recursive: true);
-      } catch (_) {/* best-effort */}
+    // 3. Read base uasset (or clone from a preceding base slot for custom
+    //    3-digit names) and base uexp (or fall back to the empty template).
+    //    Mirrors RR_VHS_Tool.py:5670-5740.
+    final dstSlotNum = _slotNumberFromName(textureName);
+    if (dstSlotNum == null) {
+      throw FormatException(
+          'Could not parse slot number from $textureName');
     }
+    final baseUasset = await _resolveUasset(
+        baseDir: baseDir,
+        horBaseDir: horBaseDir,
+        textureName: textureName,
+        genreCode: genreCode,
+        dstSlotNum: dstSlotNum,
+        isNewRelease: isNewRelease);
+
+    final baseUexp = await _resolveUexp(
+        baseDir: baseDir,
+        horBaseDir: horBaseDir,
+        textureName: textureName,
+        dstSlotNum: dstSlotNum,
+        isNewRelease: isNewRelease);
+
+    final artifacts = composeArtifacts(
+      ddsBytes: ddsBytes,
+      baseUexp: baseUexp,
+      baseUasset: baseUasset,
+    );
+
+    // 4. Write outputs into the new pak's mirror folder.
+    final destDir = Directory(p.join(workRoot, 'RetroRewind', 'Content',
+        'VideoStore', 'asset', 'prop', 'vhs', 'Background', folder));
+    await destDir.create(recursive: true);
+    await Future.wait([
+      File(p.join(destDir.path, '$textureName.uasset'))
+          .writeAsBytes(artifacts.uasset),
+      File(p.join(destDir.path, '$textureName.uexp'))
+          .writeAsBytes(artifacts.uexp),
+      File(p.join(destDir.path, '$textureName.ubulk'))
+          .writeAsBytes(artifacts.ubulk),
+    ]);
+  }
+
+  /// Resolve the texconv DDS bytes for [textureName].  On a cache hit
+  /// (source path mtime + crop params unchanged since last build), reads
+  /// the saved DDS and skips both the pure-Dart prepare AND the texconv
+  /// subprocess — the two slowest phases per slot.  Cache lives under
+  /// `<workingDir>/.tex_cache/` next to the existing PakCache.
+  Future<Uint8List> _ddsForReplacement({
+    required AppConfig config,
+    required String textureName,
+    required TextureReplacement replacement,
+    required bool isNewRelease,
+  }) async {
+    final cacheKey = await _texCacheKey(replacement, isNewRelease: isNewRelease);
+    final cacheDir = Directory(p.join(pakCache.workingDir, '.tex_cache'));
+    final cacheFile = File(p.join(cacheDir.path, '$cacheKey.dds'));
+    if (await cacheFile.exists()) {
+      return cacheFile.readAsBytes();
+    }
+
+    // Run prepare + texconv in a worker isolate.  This:
+    //   * keeps the main isolate free, so the spinner spins and the log
+    //     scroll stays smooth during a build;
+    //   * gives true multicore parallelism — multiple chunked workers each
+    //     spawn their own isolate, so cubic resize and PNG encode actually
+    //     run in parallel instead of taking turns on the main isolate.
+    final ddsBytes = await Isolate.run(() => _prepareAndTexconvInIsolate(
+          sourcePath: replacement.path,
+          offsetX: replacement.offsetX,
+          offsetY: replacement.offsetY,
+          zoom: replacement.zoom,
+          isFullCanvas: isNewRelease,
+          texconvPath: config.texconv,
+          textureName: textureName,
+        ));
+
+    // Persist for next build.  Best-effort — a write failure shouldn't
+    // abort the build, just means we'll re-prepare next time.
+    try {
+      await cacheDir.create(recursive: true);
+      await cacheFile.writeAsBytes(ddsBytes);
+    } catch (_) {}
+
+    return ddsBytes;
+  }
+
+  /// Stable per-slot cache key derived from the replacement source's mtime
+  /// + crop params + canvas fit.  Source path *value* is included so
+  /// changing the file behind the same params still busts the cache.
+  /// FNV-1a 64-bit hash — not cryptographic but deterministic across runs
+  /// (Object.hashAll is randomised, which would invalidate the cache every
+  /// app restart).
+  Future<String> _texCacheKey(
+      TextureReplacement r, {required bool isNewRelease}) async {
+    int mtimeMs;
+    try {
+      mtimeMs = (await File(r.path).stat()).modified.millisecondsSinceEpoch;
+    } catch (_) {
+      mtimeMs = 0;
+    }
+    final raw = '${r.path}|$mtimeMs|${r.offsetX}|${r.offsetY}|${r.zoom}|'
+        '${isNewRelease ? "nr" : "bkg"}';
+    return _fnv1a64Hex(raw);
   }
 
   /// Build the texconv argv used in production injection.  Public so tests
@@ -447,6 +485,79 @@ class TextureInjectorImpl implements TextureInjector {
     }
     return res.path!;
   }
+}
+
+/// Run the slow part of the inject pipeline (PNG resize+encode then
+/// texconv subprocess) inside the calling isolate.  Top-level so it can
+/// be passed across the [Isolate.run] boundary; the main isolate stays
+/// free during the call.
+Future<Uint8List> _prepareAndTexconvInIsolate({
+  required String sourcePath,
+  required int offsetX,
+  required int offsetY,
+  required double zoom,
+  required bool isFullCanvas,
+  required String texconvPath,
+  required String textureName,
+}) async {
+  // 1. Pure-Dart resize/pad (slow — package:image cubic interpolation +
+  //    PNG encode).  Lives entirely in this isolate so the main isolate
+  //    can keep rendering.
+  final sourceBytes = await File(sourcePath).readAsBytes();
+  final pngBytes = const ImagePreparer().encode(
+    sourceBytes: sourceBytes,
+    offsetX: offsetX,
+    offsetY: offsetY,
+    zoom: zoom,
+    fit: isFullCanvas ? CanvasFit.fullCanvas : CanvasFit.bkg,
+  );
+
+  final tmpDir = await Directory.systemTemp.createTemp('rr_iso_${textureName}_');
+  try {
+    final pngPath = p.join(tmpDir.path, '$textureName.png');
+    await File(pngPath).writeAsBytes(pngBytes);
+
+    // 2. texconv subprocess.  Argv must match Python (RR_VHS_Tool.py:
+    //    5621-5622) so output bytes line up byte-for-byte.
+    final r = await Process.run(texconvPath, [
+      '-f', 'DXT1',
+      '-w', '$kTexconvWidth',
+      '-h', '$kTexconvHeight',
+      '-if', 'LINEAR',
+      '-srgb',
+      '-o', tmpDir.path,
+      '-y', pngPath,
+    ]);
+    if (r.exitCode != 0) {
+      final stderr = (r.stderr ?? '').toString().trim();
+      throw StateError('texconv failed: $stderr');
+    }
+
+    final ddsPath = p.join(tmpDir.path, '$textureName.dds');
+    final ddsFile = File(ddsPath);
+    if (!await ddsFile.exists()) {
+      throw const FileSystemException(
+          'texconv reported success but produced no DDS file');
+    }
+    return ddsFile.readAsBytes();
+  } finally {
+    try {
+      await tmpDir.delete(recursive: true);
+    } catch (_) {/* best-effort */}
+  }
+}
+
+/// FNV-1a 64-bit hash → 16-char hex.  Stable across runs (unlike Dart's
+/// randomised Object.hashAll) so the texture cache survives app restarts.
+String _fnv1a64Hex(String s) {
+  const fnvPrime = 0x100000001b3;
+  const fnvOffset = 0xcbf29ce484222325;
+  var hash = fnvOffset;
+  for (final cu in s.codeUnits) {
+    hash ^= cu;
+    hash = (hash * fnvPrime) & 0xFFFFFFFFFFFFFFFF;
+  }
+  return hash.toRadixString(16).padLeft(16, '0');
 }
 
 /// Strip the trailing `_NN` / `_NNN` from a texture name.  E.g.

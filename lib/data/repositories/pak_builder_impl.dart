@@ -27,6 +27,24 @@ import '../services/pak_cache.dart';
 import '../services/transparent_tsub_builder.dart';
 import 'texture_injector_impl.dart';
 
+/// Maximum number of injects in flight at once.  Each inject spawns a
+/// worker isolate that runs the pure-Dart prepare (cubic resize + PNG
+/// encode) AND the texconv subprocess; both are CPU-bound, so the main
+/// limit is core count.  Defaulting to 6 — a sweet spot on typical
+/// 8-core dev machines that still leaves cores for the UI isolate +
+/// the Windows subprocess plumbing.
+const int _kInjectParallelism = 6;
+
+class _InjectTask {
+  final String name;
+  final String genreCode;
+  final TextureReplacement? replacement;
+  const _InjectTask(
+      {required this.name, required this.genreCode, this.replacement});
+}
+
+enum _InjectOutcome { injected, placeholder, failed }
+
 /// Build pipeline.  Mirrors the Python `_build()` flow (RR_VHS_Tool.py:13860-
 /// 14150) operating in CUSTOM_ONLY_MODE: the mod pak only contains the genres
 /// the user has actually customised.  Genres without `custom_slots.json`
@@ -43,6 +61,9 @@ class PakBuilderImpl implements PakBuilder {
   late final NewReleaseDataTableBuilder _nrDtBuilder;
   late final StandeeBlueprintCloner _blueprintCloner;
   final _logController = StreamController<String>.broadcast();
+  final _progressController = StreamController<BuildProgress>.broadcast();
+  int _progressCurrent = 0;
+  int _progressTotal = 0;
 
   PakBuilderImpl(this.workingDir) : _pakCache = PakCache(workingDir) {
     _dataTables = DataTableManager(DataTableBuilder(_pakCache));
@@ -59,12 +80,55 @@ class PakBuilderImpl implements PakBuilder {
   @override
   Stream<String> get logStream => _logController.stream;
 
+  @override
+  Stream<BuildProgress> get progressStream => _progressController.stream;
+
   void _log(String line) {
     _logController.add('[Build] $line');
   }
 
+  /// Emit one tick of progress with the given [label] (description of the
+  /// unit of work that just completed).  Total is set up front in build();
+  /// this just advances current by 1.
+  void _step(String label) {
+    _progressCurrent++;
+    _progressController.add(BuildProgress(
+      current: _progressCurrent.clamp(0, _progressTotal),
+      total: _progressTotal,
+      label: label,
+    ));
+  }
+
+  /// Called once at the very start of build() so the UI can render an
+  /// empty bar before any work has happened.
+  void _initProgress(int total) {
+    _progressCurrent = 0;
+    _progressTotal = total;
+    _progressController.add(BuildProgress(
+      current: 0,
+      total: total,
+      label: 'Starting…',
+    ));
+  }
+
+  /// Run [body] under a phase label and accumulate the elapsed time into
+  /// [timings].  The dump at the end of [build] reports all phases sorted
+  /// by cost so it's obvious where the slow ones are.
+  Future<T> _phase<T>(String label, Map<String, int> timings,
+      Future<T> Function() body) async {
+    final sw = Stopwatch()..start();
+    try {
+      return await body();
+    } finally {
+      sw.stop();
+      timings[label] = (timings[label] ?? 0) + sw.elapsedMilliseconds;
+    }
+  }
+
   @override
   Future<BuildResult> build(AppConfig config) async {
+    final overall = Stopwatch()..start();
+    final timings = <String, int>{};
     _log('Starting build (Flutter port $kFlutterBuildVersion)');
 
     if (!config.hasRepak || !File(config.repak).existsSync()) {
@@ -89,32 +153,61 @@ class PakBuilderImpl implements PakBuilder {
     }
     _log('Work dir: ${workRoot.path}');
 
-    // Extract AssetRegistry.bin from base pak and copy into work tree.
-    // Non-fatal: Python emits [E011] as a warning and continues the build
-    // (RR_VHS_Tool.py:14128-14132).
-    const arInternal = 'RetroRewind/AssetRegistry.bin';
-    final ar = await _pakCache.extractFile(config, arInternal);
-    if (ar.ok) {
-      final dst = p.join(workRoot.path, 'RetroRewind', 'AssetRegistry.bin');
-      await Directory(p.dirname(dst)).create(recursive: true);
-      await File(ar.path!).copy(dst);
-      _log('AssetRegistry.bin included (${(ar.sizeBytes! / 1024).round()} KB)');
-    } else {
-      _log('WARNING: ${ar.warning}');
-    }
-
-    // Load both per-machine state files.
-    //   replacements.json — keyed by texture name → user image path + offsets.
-    //   custom_slots.json — keyed by DataTable name → ordered slot metadata.
-    // Python keeps the two files in lockstep via its UI; the Flutter port
-    // just consumes whatever is on disk.  Slice 4 will add the editor.
+    // Load all three per-machine state files up front so we can size the
+    // progress bar correctly.  Python keeps replacements + custom_slots in
+    // lockstep via its UI; the Flutter port just consumes whatever's on
+    // disk.
     final replacements = await _safeLoadReplacements();
     final customSlots = await _safeLoadCustomSlots();
+    final nrSlots = await _safeLoadNrSlots();
+
+    // Compute total progress units before any work starts.  Each unit is
+    // one observable thing the UI can announce: AR + DTs + per-slot
+    // injects + per-NR standees + NR cover injects + T_Subs + repak +
+    // install.  Genre slots dominate the wall-clock so they dominate
+    // the bar — proportional to actual time spent.
+    final genreSlotCount = customSlots.values
+        .expand((l) => l)
+        .where((s) => s.bkgTex.startsWith('T_Bkg_'))
+        .length;
+    final eligibleNrSlots = [
+      for (final s in nrSlots) if (kNrGenreByte.containsKey(s.genre)) s,
+    ];
+    final nrCoverSlots = eligibleNrSlots
+        .where((s) => replacements.containsKey(s.bkgTex))
+        .length;
+    final progressTotal = 1 // AR
+        + customSlots.length // one per genre DataTable
+        + genreSlotCount // genre injects
+        + (eligibleNrSlots.isNotEmpty ? 1 : 0) // NR DT
+        + eligibleNrSlots.length * 3 // per-NR: MI + thumb + blueprint
+        + nrCoverSlots // NR cover injects
+        + 1 // T_Subs
+        + 1 // repak pack
+        + 1; // install
+    _initProgress(progressTotal);
 
     if (customSlots.isEmpty) {
       _log('No custom_slots.json entries — pak will be a no-op '
           '(AssetRegistry only).');
     }
+
+    // Extract AssetRegistry.bin from base pak and copy into work tree.
+    // Non-fatal: Python emits [E011] as a warning and continues the build
+    // (RR_VHS_Tool.py:14128-14132).
+    await _phase('AssetRegistry extract', timings, () async {
+      const arInternal = 'RetroRewind/AssetRegistry.bin';
+      final ar = await _pakCache.extractFile(config, arInternal);
+      if (ar.ok) {
+        final dst = p.join(workRoot.path, 'RetroRewind', 'AssetRegistry.bin');
+        await Directory(p.dirname(dst)).create(recursive: true);
+        await File(ar.path!).copy(dst);
+        _log('AssetRegistry.bin included (${(ar.sizeBytes! / 1024).round()} KB)');
+      } else {
+        _log('WARNING: ${ar.warning}');
+      }
+      _step('AssetRegistry extracted');
+    });
 
     // Build DataTables only for genres present in customSlots.  The manager
     // skips any genre without an override (CUSTOM_ONLY_MODE).
@@ -122,20 +215,23 @@ class PakBuilderImpl implements PakBuilder {
         Directory(p.join(workRoot.path, kDataTableRootPath));
     await dtDir.create(recursive: true);
     try {
-      final results = await _dataTables.buildAll(
-        config,
-        slotOverrides: customSlots,
-        log: (dt, msg) => _log('DataTable[$dt]: $msg'),
-      );
-      for (final entry in results.entries) {
-        final dt = entry.key;
-        final r = entry.value;
-        await File(p.join(dtDir.path, '$dt.uasset'))
-            .writeAsBytes(r.uassetBytes);
-        await File(p.join(dtDir.path, '$dt.uexp'))
-            .writeAsBytes(r.uexpBytes);
-      }
-      _log('Wrote ${results.length} custom DataTables to ${dtDir.path}');
+      await _phase('Genre DataTables', timings, () async {
+        final results = await _dataTables.buildAll(
+          config,
+          slotOverrides: customSlots,
+          log: (dt, msg) => _log('DataTable[$dt]: $msg'),
+        );
+        for (final entry in results.entries) {
+          final dt = entry.key;
+          final r = entry.value;
+          await File(p.join(dtDir.path, '$dt.uasset'))
+              .writeAsBytes(r.uassetBytes);
+          await File(p.join(dtDir.path, '$dt.uexp'))
+              .writeAsBytes(r.uexpBytes);
+          _step('DataTable $dt');
+        }
+        _log('Wrote ${results.length} custom DataTables to ${dtDir.path}');
+      });
     } on DataTableBuildError catch (e) {
       return _fail(e.code, '${e.dataTableName}: ${e.message}');
     } catch (e) {
@@ -147,16 +243,17 @@ class PakBuilderImpl implements PakBuilder {
     // inline mips); slots without get the placeholder triple (cloned uasset
     // + template uexp + zero ubulk = black cover) so the row reference still
     // resolves to a real asset and doesn't render as missing.
-    await _writeTextures(config, workRoot.path, customSlots, replacements);
+    await _phase('Genre textures', timings, () =>
+        _writeTextures(config, workRoot.path, customSlots, replacements));
 
     // Build NewRelease DataTable + per-NR standee assets.  Slots come from
     // nr_custom_slots.json (loaded next to the executable, same convention
     // as custom_slots.json).  When the file is empty, the whole NR step is
     // skipped — the in-game New Releases shelf falls back to the base game.
-    final nrSlots = await _safeLoadNrSlots();
     if (nrSlots.isNotEmpty) {
       try {
-        await _writeNrAssets(config, workRoot.path, nrSlots);
+        await _phase('NR DT + standees', timings, () =>
+            _writeNrAssets(config, workRoot.path, nrSlots));
       } on NewReleaseBuildError catch (e) {
         return _fail(e.code, 'NewRelease DT: ${e.message}');
       } catch (e) {
@@ -166,7 +263,8 @@ class PakBuilderImpl implements PakBuilder {
       // replacement entry — slots without a cover let the engine fall back
       // to the base game's NR texture (which is fine for genres with
       // newCount>0 and acceptable as a "no cover yet" state).
-      await _writeNrTextures(config, workRoot.path, nrSlots, replacements);
+      await _phase('NR textures', timings, () =>
+          _writeNrTextures(config, workRoot.path, nrSlots, replacements));
     } else {
       _log('No NR slots — skipping New Release DT + standees');
     }
@@ -177,7 +275,9 @@ class PakBuilderImpl implements PakBuilder {
     // referenced by a custom slot's sub_tex field.  All identical
     // transparent images so sharing names across slots is safe.
     // RR_VHS_Tool.py:14007-14060.
-    await _writeTransparentSubjects(workRoot.path, customSlots);
+    await _phase('T_Sub writes', timings, () =>
+        _writeTransparentSubjects(workRoot.path, customSlots));
+    _step('Transparent T_Subs');
 
     // Output pak path (next to working dir, like Python's OUTPUT_DIR).
     final pakPath = p.join(workingDir, kOutputPakFilename);
@@ -185,13 +285,14 @@ class PakBuilderImpl implements PakBuilder {
     _log('Running: repak pack --version V11');
     final ProcessResult res;
     try {
-      res = await Process.run(
-        config.repak,
-        ['pack', '--version', 'V11', workRoot.path, pakPath],
-      );
+      res = await _phase('repak pack', timings, () => Process.run(
+            config.repak,
+            ['pack', '--version', 'V11', workRoot.path, pakPath],
+          ));
     } catch (e) {
       return _fail('E009', 'repak invocation threw: $e');
     }
+    _step('Pak built');
 
     if (res.exitCode != 0) {
       final stderr = (res.stderr ?? '').toString().trim();
@@ -216,21 +317,46 @@ class PakBuilderImpl implements PakBuilder {
             'mods_folder does not exist: "${config.modsFolder}"');
       }
       final dst = p.join(config.modsFolder, kOutputPakFilename);
-      installedPath = await _copyWithRetry(pakPath, dst);
+      installedPath = await _phase('install', timings, () => _copyWithRetry(pakPath, dst));
       if (installedPath == null) {
         return _fail('E010',
             'Could not copy pak to ~mods (file may be locked by the game)');
       }
       _log('Installed to: $installedPath');
+      _step('Installed');
     } else {
       _log('mods_folder not configured — pak built but not installed');
+      _step('Skipped install');
     }
+
+    overall.stop();
+    _logTimings(timings, overall.elapsedMilliseconds);
 
     return BuildResult.ok(
       pakPath: pakPath,
       installedPath: installedPath,
       pakSizeBytes: size,
     );
+  }
+
+  /// Pretty-print phase timings sorted by cost so the slow ones jump out.
+  void _logTimings(Map<String, int> timings, int totalMs) {
+    _log('━━━ Build summary (${(totalMs / 1000).toStringAsFixed(2)}s) ━━━');
+    final sorted = timings.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final maxLabelLen =
+        sorted.fold<int>(0, (m, e) => e.key.length > m ? e.key.length : m);
+    for (final e in sorted) {
+      final pct = totalMs > 0 ? (e.value * 100 / totalMs).round() : 0;
+      _log('  ${e.key.padRight(maxLabelLen)}  '
+          '${(e.value / 1000).toStringAsFixed(2)}s  ($pct%)');
+    }
+    final accounted = timings.values.fold<int>(0, (a, b) => a + b);
+    final unaccounted = totalMs - accounted;
+    if (unaccounted > 50) {
+      _log('  ${"(other)".padRight(maxLabelLen)}  '
+          '${(unaccounted / 1000).toStringAsFixed(2)}s');
+    }
   }
 
   Future<Map<String, TextureReplacement>> _safeLoadReplacements() async {
@@ -308,6 +434,7 @@ class PakBuilderImpl implements PakBuilder {
     await File(p.join(dtDir, 'NewRelease_Details_-_Data.uexp'))
         .writeAsBytes(dtResult.uexpBytes);
     _log('  NR DT: ${dtResult.rowCount} row(s) written');
+    _step('NR DataTable');
 
     // 2) Per-slot standee assets.  Load templates once.
     final StandeeTemplates templates;
@@ -336,6 +463,7 @@ class PakBuilderImpl implements PakBuilder {
         fail++;
         _log('  MI FAIL ${s.bkgTex}: $e');
       }
+      _step('MI ${s.bkgTex}');
 
       // 2b) Thumbnail texture.
       try {
@@ -347,6 +475,7 @@ class PakBuilderImpl implements PakBuilder {
         fail++;
         _log('  Thumb FAIL ${s.bkgTex}: $e');
       }
+      _step('Thumb ${s.bkgTex}');
 
       // 2c) Standee mesh blueprint clone.
       try {
@@ -364,6 +493,7 @@ class PakBuilderImpl implements PakBuilder {
         fail++;
         _log('  Blueprint FAIL ${s.bkgTex}: $e');
       }
+      _step('Blueprint ${s.bkgTex}');
     }
     _log('  Standees: $miOk MI, $thumbOk thumb, $bpOk blueprint '
         '($fail failures)');
@@ -398,23 +528,41 @@ class PakBuilderImpl implements PakBuilder {
       _log('No NR cover replacements — skipping T_New injection');
       return;
     }
-    _log('Injecting ${eligible.length} NR cover texture(s)...');
-    var injected = 0, failed = 0;
-    for (final s in eligible) {
+    _log('Injecting ${eligible.length} NR cover texture(s) '
+        '(parallelism=$_kInjectParallelism)...');
+    final tasks = [
+      for (final s in eligible)
+        _InjectTask(
+            name: s.bkgTex,
+            genreCode: s.genreCode,
+            replacement: replacements[s.bkgTex])
+    ];
+
+    Future<_InjectOutcome> runOne(_InjectTask t) async {
       try {
         await _injector.inject(
           config: config,
           workRoot: workRoot,
-          textureName: s.bkgTex,
-          genreCode: s.genreCode,
-          replacement: replacements[s.bkgTex]!,
+          textureName: t.name,
+          genreCode: t.genreCode,
+          replacement: t.replacement!,
         );
-        injected++;
-        _log('  INJECT NR  ${s.bkgTex}');
+        _log('  INJECT NR  ${t.name}');
+        _step('Injected NR ${t.name}');
+        return _InjectOutcome.injected;
       } catch (e) {
-        failed++;
-        _log('  FAIL   NR  ${s.bkgTex}: $e');
+        _log('  FAIL   NR  ${t.name}: $e');
+        _step('Failed NR ${t.name}');
+        return _InjectOutcome.failed;
       }
+    }
+
+    final outcomes = await _runChunked<_InjectOutcome>(
+        tasks, _kInjectParallelism, runOne);
+    var injected = 0, failed = 0;
+    for (final o in outcomes) {
+      if (o == _InjectOutcome.injected) injected++;
+      if (o == _InjectOutcome.failed) failed++;
     }
     _log('NR covers: $injected injected, $failed failed');
   }
@@ -431,13 +579,17 @@ class PakBuilderImpl implements PakBuilder {
         customSlots.values.fold<int>(0, (a, list) => a + list.length);
     if (totalSlots == 0) return;
 
-    _log('Writing $totalSlots custom texture slot(s)...');
+    _log('Writing $totalSlots custom texture slot(s) '
+        '(parallelism=$_kInjectParallelism)...');
+
+    // Flatten the work list, dropping non-T_Bkg / unparseable entries.
+    // T_New_* slots arrive via _writeNrTextures, never via customSlots.
+    final tasks = <_InjectTask>[];
     for (final entry in customSlots.entries) {
       for (final slot in entry.value) {
         final name = slot.bkgTex;
-        // Slice 3 only handles `T_Bkg_*` slots.  T_New / NR will come in 3c.
         if (!name.startsWith('T_Bkg_')) {
-          _log('  SKIP $name: not T_Bkg (deferred to slice 3c)');
+          _log('  SKIP $name: not T_Bkg');
           continue;
         }
         final genre = parseGenreFromTextureName(name);
@@ -445,36 +597,78 @@ class PakBuilderImpl implements PakBuilder {
           _log('  SKIP $name: cannot parse genre');
           continue;
         }
-        final replacement = replacements[name];
-        try {
-          if (replacement != null) {
-            await _injector.inject(
-              config: config,
-              workRoot: workRoot,
-              textureName: name,
-              genreCode: genre.code,
-              replacement: replacement,
-            );
-            injected++;
-            _log('  INJECT      $name');
-          } else {
-            await _injector.writePlaceholder(
-              config: config,
-              workRoot: workRoot,
-              textureName: name,
-              genreCode: genre.code,
-            );
-            placeholders++;
-            _log('  PLACEHOLDER $name');
-          }
-        } catch (e) {
-          failed++;
-          _log('  FAIL        $name: $e');
+        tasks.add(_InjectTask(
+            name: name, genreCode: genre.code, replacement: replacements[name]));
+      }
+    }
+
+    Future<_InjectOutcome> runOne(_InjectTask t) async {
+      try {
+        if (t.replacement != null) {
+          await _injector.inject(
+            config: config,
+            workRoot: workRoot,
+            textureName: t.name,
+            genreCode: t.genreCode,
+            replacement: t.replacement!,
+          );
+          _log('  INJECT      ${t.name}');
+          _step('Injected ${t.name}');
+          return _InjectOutcome.injected;
+        } else {
+          await _injector.writePlaceholder(
+            config: config,
+            workRoot: workRoot,
+            textureName: t.name,
+            genreCode: t.genreCode,
+          );
+          _log('  PLACEHOLDER ${t.name}');
+          _step('Placeholder ${t.name}');
+          return _InjectOutcome.placeholder;
         }
+      } catch (e) {
+        _log('  FAIL        ${t.name}: $e');
+        _step('Failed ${t.name}');
+        return _InjectOutcome.failed;
+      }
+    }
+
+    final outcomes = await _runChunked<_InjectOutcome>(
+        tasks, _kInjectParallelism, runOne);
+    for (final o in outcomes) {
+      switch (o) {
+        case _InjectOutcome.injected:
+          injected++;
+        case _InjectOutcome.placeholder:
+          placeholders++;
+        case _InjectOutcome.failed:
+          failed++;
       }
     }
     _log('Textures written: $injected injected, $placeholders placeholder, '
         '$failed failed (of $totalSlots)');
+  }
+
+  /// Run [body] over [items] with at most [concurrency] futures in flight.
+  /// Order of results matches [items]; per-item exceptions must be caught
+  /// inside [body] (this helper does not isolate them).
+  Future<List<R>> _runChunked<R>(
+      List<_InjectTask> items, int concurrency,
+      Future<R> Function(_InjectTask) body) async {
+    final results = List<R?>.filled(items.length, null);
+    var next = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final i = next++;
+        if (i >= items.length) return;
+        results[i] = await body(items[i]);
+      }
+    }
+
+    final workers = [for (var i = 0; i < concurrency; i++) worker()];
+    await Future.wait(workers);
+    return [for (final r in results) r as R];
   }
 
   Future<void> _writeTransparentSubjects(
@@ -540,5 +734,6 @@ class PakBuilderImpl implements PakBuilder {
 
   void dispose() {
     _logController.close();
+    _progressController.close();
   }
 }

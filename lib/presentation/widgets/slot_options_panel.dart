@@ -9,6 +9,7 @@ import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/nr_slot_logic.dart';
+import '../../domain/repositories/pak_builder.dart' show BuildProgress;
 import '../../domain/sku.dart';
 import '../providers/providers.dart';
 import 'rarity_picker.dart';
@@ -664,6 +665,33 @@ class _BuildSection extends ConsumerWidget {
     final state = ref.watch(buildControllerProvider);
     final controller = ref.read(buildControllerProvider.notifier);
 
+    // Fire a SnackBar exactly once on the running → success transition so
+    // the user gets a clear "done" signal even when their attention is
+    // elsewhere.  Failures keep using the inline pink error box below
+    // since they need a stickier presentation.
+    ref.listen<BuildState>(buildControllerProvider, (prev, next) {
+      if (prev?.isRunning == true && !next.isRunning &&
+          next.lastBuildSucceeded) {
+        final elapsed = next.lastBuildElapsedMs != null
+            ? '${(next.lastBuildElapsedMs! / 1000).toStringAsFixed(1)}s'
+            : '?s';
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
+            backgroundColor: kColorPanel,
+            duration: const Duration(seconds: 5),
+            content: Text(
+              '✓ BUILD DONE — pak shipped in $elapsed',
+              style: const TextStyle(
+                  color: kColorCyan,
+                  fontFamily: kFontFamily,
+                  fontSize: kFsBody,
+                  letterSpacing: 1),
+            ),
+          ));
+      }
+    });
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -675,12 +703,28 @@ class _BuildSection extends ConsumerWidget {
                   height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Icon(Icons.local_shipping_outlined, size: 18),
+              : Icon(
+                  state.lastBuildSucceeded
+                      ? Icons.check_circle_outline
+                      : Icons.local_shipping_outlined,
+                  size: 18),
           label: Text(
-            state.isRunning ? 'BUILDING...' : 'SHIP TO STORE',
+            state.isRunning
+                ? 'BUILDING...'
+                : state.lastBuildSucceeded
+                    ? 'SHIP AGAIN'
+                    : 'SHIP TO STORE',
             style: const TextStyle(letterSpacing: 1.5),
           ),
         ),
+        if (state.isRunning && state.progress != null) ...[
+          const SizedBox(height: kSp2),
+          _BuildProgressBar(progress: state.progress!),
+        ],
+        if (!state.isRunning && state.lastBuildSucceeded) ...[
+          const SizedBox(height: kSp2),
+          _BuildSuccessBanner(state: state),
+        ],
         const SizedBox(height: kSp3),
         Row(
           children: [
@@ -773,6 +817,117 @@ class _BuildSection extends ConsumerWidget {
       return kColorCyan;
     }
     return kColorText2;
+  }
+}
+
+/// Determinate progress bar shown while a build is running.  Each unit
+/// in [BuildProgress] is one observable thing the build did (a slot
+/// inject, a DataTable write, a standee asset, etc.) so the bar fills
+/// proportionally to actual time spent — not just to a single phase.
+class _BuildProgressBar extends StatelessWidget {
+  final BuildProgress progress;
+  const _BuildProgressBar({required this.progress});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.zero,
+          child: LinearProgressIndicator(
+            value: progress.fraction,
+            backgroundColor: kColorSurface,
+            valueColor: const AlwaysStoppedAnimation(kColorCyan),
+            minHeight: 6,
+          ),
+        ),
+        const SizedBox(height: kSp1),
+        Row(
+          children: [
+            Text(
+              '${progress.current}/${progress.total}',
+              style: const TextStyle(
+                fontFamily: kFontFamily,
+                fontSize: kFsMeta,
+                color: kColorCyan,
+              ),
+            ),
+            const SizedBox(width: kSp2),
+            Expanded(
+              child: Text(
+                progress.label,
+                style: const TextStyle(
+                  fontFamily: kFontFamily,
+                  fontSize: kFsMeta,
+                  color: kColorText3,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Cyan banner showing the most recent successful build's outcome —
+/// elapsed time + pak size + install path.  Stays visible until the next
+/// ship() resets the state.
+class _BuildSuccessBanner extends StatelessWidget {
+  final BuildState state;
+  const _BuildSuccessBanner({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final elapsed = state.lastBuildElapsedMs != null
+        ? '${(state.lastBuildElapsedMs! / 1000).toStringAsFixed(1)}s'
+        : '?s';
+    final size = state.lastPakSizeBytes != null
+        ? '${(state.lastPakSizeBytes! / (1024 * 1024)).toStringAsFixed(1)} MB'
+        : '?';
+    final installed = state.lastInstalledPath ?? '(not installed)';
+    return Container(
+      padding: const EdgeInsets.all(kSp2),
+      decoration: BoxDecoration(
+        color: kColorPanel,
+        border: Border.all(color: kColorCyan, width: 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.check_circle, color: kColorCyan, size: 16),
+              const SizedBox(width: kSp2),
+              Text(
+                'DONE in $elapsed · $size',
+                style: const TextStyle(
+                  color: kColorCyan,
+                  fontFamily: kFontFamily,
+                  fontSize: kFsBody,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: kSp1),
+          Text(
+            installed,
+            style: const TextStyle(
+              color: kColorText3,
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
   }
 }
 
