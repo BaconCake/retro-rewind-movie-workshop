@@ -49,6 +49,7 @@ test_covers/
 diag_*.py
 generate_test_library.py
 sanity_check_all_nrs.py
+_dev_scripts/
 
 # ── PyInstaller build artifacts ─────────────────────────────────────────
 build/
