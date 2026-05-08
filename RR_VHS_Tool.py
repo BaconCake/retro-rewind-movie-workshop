@@ -491,7 +491,7 @@ on specific in-game days, have standee displays, and use T_New_XXX_NN textures.
 ============================================================================="""
 
 
-TOOL_VERSION = "v1.8.3-dev"  # bump this on every release
+TOOL_VERSION = "v1.8.2.2"  # bump this on every release
 
 # Error codes for build diagnostics — shown to users for bug reports
 ERROR_CODES = {
@@ -2419,6 +2419,146 @@ def prepare_nr_legacy_2digit_in_cache(pak_cache, genre_code, tex_num):
         )
     return all(os.path.exists(os.path.join(target_dir, f"{target_name}.{ext}"))
                for ext in ("uasset", "uexp", "ubulk"))
+
+
+def _patch_legacy_2digit_uasset(data, src_code, src_num, dst_code, dst_num):
+    """Length-preserving FName patch on a T_New uasset: rename
+    T_New_<src_code>_<src_num:02d> → T_New_<dst_code>_<dst_num:02d>.
+
+    Donor and target short names are both 12 chars (e.g. T_New_Hor_01),
+    folders are both 9 chars (T_Bkg_<3char>) — so all SerialOffsets and
+    serial_size fields stay valid and the file is the same length. We just
+    patch in place and zero the FName hashes on touched entries (UE accepts
+    zero hashes). Export stored_number stays 0 (literal-style FName for
+    slot<100, identical between donor and target).
+    """
+    import struct as _s
+    data = bytearray(data)
+    src_short  = f"T_New_{src_code}_{src_num:02d}"
+    dst_short  = f"T_New_{dst_code}_{dst_num:02d}"
+    src_folder = f"T_Bkg_{src_code}"
+    dst_folder = f"T_Bkg_{dst_code}"
+    if len(src_short) != len(dst_short) or len(src_folder) != len(dst_folder):
+        raise ValueError(
+            f"length-preserving rename requires equal lengths: "
+            f"{src_short!r}->{dst_short!r}, {src_folder!r}->{dst_folder!r}")
+
+    src_short_b  = src_short.encode()
+    dst_short_b  = dst_short.encode()
+    src_folder_b = src_folder.encode()
+    dst_folder_b = dst_folder.encode()
+
+    # Patch PackageName FString (len-prefixed, NUL-terminated, at 0x24)
+    pkg_len = _s.unpack_from('<i', data, 0x20)[0]
+    pkg_str = bytes(data[0x24:0x24 + pkg_len - 1])
+    new_pkg = (pkg_str.replace(src_short_b, dst_short_b)
+                       .replace(src_folder_b, dst_folder_b))
+    if len(new_pkg) != len(pkg_str):
+        raise ValueError("PackageName length changed unexpectedly")
+    data[0x24:0x24 + len(new_pkg)] = new_pkg
+
+    # Patch name table entries
+    fse = 0x24 + pkg_len
+    name_count  = _s.unpack_from('<i', data, fse + 4)[0]
+    name_offset = _s.unpack_from('<i', data, fse + 8)[0]
+
+    pos = name_offset
+    for _ in range(name_count):
+        if pos + 4 > len(data): break
+        slen = _s.unpack_from('<i', data, pos)[0]
+        if slen <= 0 or slen > 500: break
+        s_bytes = bytes(data[pos+4:pos+4+slen])
+        new_bytes = (s_bytes.replace(src_short_b, dst_short_b)
+                            .replace(src_folder_b, dst_folder_b))
+        if new_bytes != s_bytes:
+            if len(new_bytes) != len(s_bytes):
+                raise ValueError(
+                    f"name table entry length changed: {s_bytes!r} -> {new_bytes!r}")
+            data[pos+4:pos+4+slen] = new_bytes
+            _s.pack_into('<I', data, pos+4+slen, 0)  # zero FName hash
+        pos += 4 + slen + 4
+
+    return bytes(data)
+
+
+def prepare_nr_legacy_2digit_clone_in_cache(pak_cache, genre_code, tex_num):
+    """Synthesize T_New_<code>_<NN:02d> in the cache by length-preserving
+    clone of T_New_Hor_01.
+
+    Used by the v1.8.2.2 legacy co-inject pass for NRs whose tex_num exceeds
+    the base game's per-genre 2-digit slot count (e.g. Sci-Fi has only
+    T_New_Sci_01..04 in base; a v1.8.1 user with hand-edited tex_num=5
+    references T_New_Sci_05 which exists nowhere → blank shelf VHS in old
+    saves). v1.8.2.1's co-inject silently skipped these via a gate; v1.8.2.2
+    drops the gate and routes here.
+
+    Donor T_New_Hor_01 is 12 chars; every 2-digit target T_New_<3char>_<2d>
+    is also 12 chars, and folders T_Bkg_<3char> are all 9 chars — so the
+    rename is length-preserving. No SerialOffset shifting, no header
+    rewrites. inject_texture writes the user's cover into the cached
+    uasset/uexp/ubulk afterward, same path the in-range co-inject uses.
+
+    Returns True on success.
+    """
+    if tex_num < 1 or tex_num > 99:
+        return False
+    target_name   = f"T_New_{genre_code}_{tex_num:02d}"
+    target_folder = f"T_Bkg_{genre_code}"
+    target_dir    = os.path.join(pak_cache._base_dir, target_folder)
+    target_uasset = os.path.join(target_dir, f"{target_name}.uasset")
+
+    expected_pkg_suffix = f"/{target_name}"
+    cached_pkg = _uasset_packagename(target_uasset)
+    pkg_ok = (cached_pkg is not None
+              and cached_pkg.endswith(expected_pkg_suffix))
+    sidecars_ok = all(
+        os.path.exists(os.path.join(target_dir, f"{target_name}.{ext}"))
+        for ext in ("uexp", "ubulk"))
+    if pkg_ok and sidecars_ok:
+        return True
+    if cached_pkg is not None and not pkg_ok:
+        print(f"[NR-Legacy] Cache invalid for {target_name} (was {cached_pkg!r}) — re-cloning")
+
+    donor_code   = "Hor"
+    donor_num    = 1
+    donor_name   = f"T_New_{donor_code}_{donor_num:02d}"
+    donor_folder = f"T_Bkg_{donor_code}"
+    donor_dir    = os.path.join(pak_cache._base_dir, donor_folder)
+    os.makedirs(donor_dir, exist_ok=True)
+    donor_pak_path = (f"RetroRewind/Content/VideoStore/asset/prop/vhs"
+                      f"/Background/{donor_folder}/{donor_name}")
+    for ext in ("uasset", "uexp", "ubulk"):
+        if not os.path.exists(os.path.join(donor_dir, f"{donor_name}.{ext}")):
+            subprocess.run(
+                [pak_cache.repak_path, "unpack",
+                 "-o", pak_cache._extract_dir, "-f",
+                 "-i", f"{donor_pak_path}.{ext}",
+                 pak_cache.pak_path],
+                capture_output=True, text=True, timeout=30,
+            )
+    for ext in ("uasset", "uexp", "ubulk"):
+        if not os.path.exists(os.path.join(donor_dir, f"{donor_name}.{ext}")):
+            print(f"[NR-Legacy] donor {donor_name}.{ext} unavailable for {target_name}")
+            return False
+
+    os.makedirs(target_dir, exist_ok=True)
+    # uexp + ubulk: pixel data is name-independent, copy verbatim
+    for ext in ("uexp", "ubulk"):
+        shutil.copy2(os.path.join(donor_dir, f"{donor_name}.{ext}"),
+                     os.path.join(target_dir, f"{target_name}.{ext}"))
+    # uasset: in-place length-preserving rename
+    with open(os.path.join(donor_dir, f"{donor_name}.uasset"), "rb") as f:
+        donor_ua = f.read()
+    try:
+        cloned_ua = _patch_legacy_2digit_uasset(
+            donor_ua, donor_code, donor_num, genre_code, tex_num)
+    except ValueError as e:
+        print(f"[NR-Legacy] uasset patch failed for {target_name}: {e}")
+        return False
+    with open(os.path.join(target_dir, f"{target_name}.uasset"), "wb") as f:
+        f.write(cloned_ua)
+    print(f"[NR-Legacy] Cached clone {target_name} ← {donor_name}")
+    return True
 
 
 def ensure_nr_texture(pak_cache, genre_code, tex_num, work_dir):
@@ -7211,7 +7351,7 @@ class VHSToolApp:
         # Edited-since-last-build tracking (persisted to disk)
         self._edited_slots = load_edited_slots()
         self._shipped_slots = load_shipped_slots()
-        # Self-heal orphan keys left over from pre-v1.8.3 deletes (or external
+        # Self-heal orphan keys left over from pre-v1.8.2.2 deletes (or external
         # JSON edits): replacements/shipped/edited could reference textures
         # that no longer exist in ALL_TEXTURES or NR_SLOT_DATA. Without this,
         # stale keys linger forever (shipped/edited are append-only at build),
@@ -7495,7 +7635,7 @@ class VHSToolApp:
         """Remove stale keys from replacements/shipped/edited that no longer
         match a current texture or NR slot.
 
-        Pre-v1.8.3 the delete handlers only cleaned `replacements`; shipped
+        Pre-v1.8.2.2 the delete handlers only cleaned `replacements`; shipped
         and edited sets were append-only at build time. Old saves carry the
         leak forward — call this once at startup to heal it. Also catches
         replacements drift from external JSON edits.
@@ -14528,26 +14668,32 @@ class VHSToolApp:
 
             # Legacy 2-digit Co-Inject — pre-v1.8.2 saves reference NR
             # textures by 2-digit FName ("T_New_Sci_01"). v1.8.2 only writes
-            # 3-digit slots, so old saves saw base-game default. For NRs whose
-            # tex_num falls within the base game's NR slot count, write the
-            # user's cover to the 2-digit slot too. NRs beyond base count
-            # (e.g. Sci_005) have no 2-digit slot in base — skipped silently.
+            # 3-digit slots, so old saves saw base-game default.
+            # In-range tex_num (≤ base game slot count): extract base 2-digit
+            # slot and re-inject the user's cover. Out-of-range tex_num (e.g.
+            # v1.8.1 user with hand-edited Sci_05 to fit 30+ NRs): no base
+            # 2-digit slot exists → synthesize one by length-preserving clone
+            # of T_New_Hor_01 (v1.8.2.2 fix; v1.8.2.1 silently skipped these).
             for _nr in NR_SLOT_DATA:
                 _gcode = _nr.get("genre_code", "")
                 _tnum  = _nr.get("tex_num", 1)
                 _ngenre = next((g for g, info in GENRES.items()
                                 if info["code"] == _gcode), None)
-                if not _ngenre:
-                    continue
-                _base_new = GENRES[_ngenre].get("new", 0)
-                if _tnum < 1 or _tnum > _base_new:
+                if not _ngenre or _tnum < 1 or _tnum > 99:
                     continue
                 _entry = self.replacements.get(f"NR_{_nr['sku']}")
                 if not _entry:
                     continue  # No custom cover, leave 2-digit slot at base default
-                if not prepare_nr_legacy_2digit_in_cache(self.pak_cache, _gcode, _tnum):
-                    print(f"[NR-Legacy] Could not extract base T_New_{_gcode}_{_tnum:02d}"
-                          f" — skipping co-inject")
+                _base_new = GENRES[_ngenre].get("new", 0)
+                if _tnum <= _base_new:
+                    _ok = prepare_nr_legacy_2digit_in_cache(self.pak_cache, _gcode, _tnum)
+                    _action = "extract base"
+                else:
+                    _ok = prepare_nr_legacy_2digit_clone_in_cache(self.pak_cache, _gcode, _tnum)
+                    _action = "clone from T_New_Hor_01"
+                if not _ok:
+                    print(f"[NR-Legacy] Could not {_action} for "
+                          f"T_New_{_gcode}_{_tnum:02d} — skipping co-inject")
                     continue
                 _legacy_tex = {
                     "name":   f"T_New_{_gcode}_{_tnum:02d}",
