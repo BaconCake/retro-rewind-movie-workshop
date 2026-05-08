@@ -162,6 +162,11 @@ class PakBuilderImpl implements PakBuilder {
       } catch (e) {
         return _fail('E004', 'NewRelease build threw: $e');
       }
+      // Custom NR cover textures (T_New_*).  Only fires for slots with a
+      // replacement entry — slots without a cover let the engine fall back
+      // to the base game's NR texture (which is fine for genres with
+      // newCount>0 and acceptable as a "no cover yet" state).
+      await _writeNrTextures(config, workRoot.path, nrSlots, replacements);
     } else {
       _log('No NR slots — skipping New Release DT + standees');
     }
@@ -372,6 +377,46 @@ class PakBuilderImpl implements PakBuilder {
     await Directory(p.dirname(fullPath)).create(recursive: true);
     await File('$fullPath.uasset').writeAsBytes(uasset);
     await File('$fullPath.uexp').writeAsBytes(uexp);
+  }
+
+  /// Inject custom T_New_* covers for the NR slots that have a replacement
+  /// entry.  Slots without a replacement are skipped — see comment at the
+  /// call site.  Per-slot failures log + continue (consistent with how
+  /// `_writeNrAssets` handles per-slot standee failures).
+  Future<void> _writeNrTextures(
+      AppConfig config,
+      String workRoot,
+      List<NewReleaseSlot> nrSlots,
+      Map<String, TextureReplacement> replacements) async {
+    final eligible = [
+      for (final s in nrSlots)
+        if (kNrGenreByte.containsKey(s.genre) &&
+            replacements.containsKey(s.bkgTex))
+          s,
+    ];
+    if (eligible.isEmpty) {
+      _log('No NR cover replacements — skipping T_New injection');
+      return;
+    }
+    _log('Injecting ${eligible.length} NR cover texture(s)...');
+    var injected = 0, failed = 0;
+    for (final s in eligible) {
+      try {
+        await _injector.inject(
+          config: config,
+          workRoot: workRoot,
+          textureName: s.bkgTex,
+          genreCode: s.genreCode,
+          replacement: replacements[s.bkgTex]!,
+        );
+        injected++;
+        _log('  INJECT NR  ${s.bkgTex}');
+      } catch (e) {
+        failed++;
+        _log('  FAIL   NR  ${s.bkgTex}: $e');
+      }
+    }
+    _log('NR covers: $injected injected, $failed failed');
   }
 
   Future<void> _writeTextures(

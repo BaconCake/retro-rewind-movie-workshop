@@ -75,13 +75,19 @@ class _SlotOptionsBody extends ConsumerWidget {
       return const _EmptyOptions();
     }
 
-    // NR slots are routed through a separate form — different fields, no
-    // texture-replacement entry, single source of truth is nrSlotsProvider.
+    // NR slots are routed through a separate form — different fields than
+    // genre slots, but the replacements.json mechanism is reused (same key:
+    // texture name).  The cover image is optional; without one the engine
+    // falls back to the base-game NR texture.
     if (selectedBkg.startsWith(kNrSelectionPrefix)) {
       final sku =
           int.tryParse(selectedBkg.substring(kNrSelectionPrefix.length));
       if (sku == null) return const _EmptyOptions();
       final nrAsync = ref.watch(nrSlotsProvider);
+      final replacements = ref.watch(replacementsProvider).maybeWhen(
+            data: (m) => m,
+            orElse: () => const {},
+          );
       return nrAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => _EmptyOptions(error: '$e'),
@@ -94,10 +100,11 @@ class _SlotOptionsBody extends ConsumerWidget {
             }
           }
           if (nr == null) return const _EmptyOptions();
+          final repl = replacements[nr.bkgTex];
           return SingleChildScrollView(
             child: KeyedSubtree(
               key: ValueKey('nr-form-${nr.sku}'),
-              child: _NrSlotForm(slot: nr, allSlots: slots),
+              child: _NrSlotForm(slot: nr, allSlots: slots, repl: repl),
             ),
           );
         },
@@ -778,8 +785,12 @@ class _BuildSection extends ConsumerWidget {
 class _NrSlotForm extends ConsumerWidget {
   final NewReleaseSlot slot;
   final List<NewReleaseSlot> allSlots;
+  // TextureReplacement?; kept loose to avoid pulling the import here, mirroring
+  // _SlotForm above.
+  final dynamic repl;
 
-  const _NrSlotForm({required this.slot, required this.allSlots});
+  const _NrSlotForm(
+      {required this.slot, required this.allSlots, this.repl});
 
   Future<void> _commitTitle(WidgetRef ref, String v) async {
     if (v == slot.title) return;
@@ -869,6 +880,13 @@ class _NrSlotForm extends ConsumerWidget {
               },
             ),
           ],
+        ),
+        const SizedBox(height: kSp3),
+        const _SubHeader('USER IMAGE'),
+        const SizedBox(height: kSp2),
+        _UserImageControls(
+          bkgTex: slot.bkgTex,
+          currentPath: repl?.path as String?,
         ),
         const SizedBox(height: kSp4),
         _DeleteNrLink(slot: slot),

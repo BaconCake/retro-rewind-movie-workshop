@@ -58,6 +58,9 @@ class TextureInjectorImpl implements TextureInjector {
           'Source image not found', replacement.path);
     }
 
+    final isNewRelease = textureName.startsWith('T_New_');
+    // T_New textures live in the same `T_Bkg_<code>` folder as the bkg
+    // textures — UE5 keeps NR covers next to genre covers on disk.
     final folder = 'T_Bkg_$genreCode';
 
     // Pull the whole genre's background folder out of the base pak.  Mirrors
@@ -70,6 +73,12 @@ class TextureInjectorImpl implements TextureInjector {
     }
     final baseDir = baseRes.path!;
 
+    // For T_New on a genre with no base-game NR textures (Romance/Western),
+    // also pull Horror's folder so we can clone `T_New_Hor_01` cross-genre.
+    // RR_VHS_Tool.py:5745-5793.
+    final horBaseDir = await _maybeExtractHorForCrossGenre(
+        config, isNewRelease, genreCode);
+
     final tmpDir = await Directory.systemTemp
         .createTemp('rr_inject_${textureName}_');
     try {
@@ -81,6 +90,7 @@ class TextureInjectorImpl implements TextureInjector {
         offsetX: replacement.offsetX,
         offsetY: replacement.offsetY,
         zoom: replacement.zoom,
+        fit: isNewRelease ? CanvasFit.fullCanvas : CanvasFit.bkg,
       );
 
       // 2. texconv → DDS in the same tmp folder.  Argv must match Python
@@ -111,14 +121,18 @@ class TextureInjectorImpl implements TextureInjector {
       }
       final baseUasset = await _resolveUasset(
           baseDir: baseDir,
+          horBaseDir: horBaseDir,
           textureName: textureName,
           genreCode: genreCode,
-          dstSlotNum: dstSlotNum);
+          dstSlotNum: dstSlotNum,
+          isNewRelease: isNewRelease);
 
-      final uexpFile = File(p.join(baseDir, '$textureName.uexp'));
-      final baseUexp = await uexpFile.exists()
-          ? await uexpFile.readAsBytes()
-          : kTBkgUexpTemplate;
+      final baseUexp = await _resolveUexp(
+          baseDir: baseDir,
+          horBaseDir: horBaseDir,
+          textureName: textureName,
+          dstSlotNum: dstSlotNum,
+          isNewRelease: isNewRelease);
 
       final artifacts = composeArtifacts(
         ddsBytes: ddsBytes,
@@ -263,11 +277,16 @@ class TextureInjectorImpl implements TextureInjector {
       throw FormatException(
           'Could not parse slot number from $textureName');
     }
+    // writePlaceholder is only called for slots without a user image —
+    // currently always T_Bkg.  T_New placeholders are intentionally skipped
+    // (NR slot without a cover → engine falls back to base game), so
+    // isNewRelease=false here, matching the historical contract.
     final baseUasset = await _resolveUasset(
         baseDir: baseDir,
         textureName: textureName,
         genreCode: genreCode,
-        dstSlotNum: dstSlotNum);
+        dstSlotNum: dstSlotNum,
+        isNewRelease: false);
 
     final destDir = Directory(p.join(workRoot, 'RetroRewind', 'Content',
         'VideoStore', 'asset', 'prop', 'vhs', 'Background', folder));
@@ -285,14 +304,18 @@ class TextureInjectorImpl implements TextureInjector {
   /// Pick the right uasset bytes for [textureName], either:
   ///   * the existing base-game file at `<baseDir>/<textureName>.uasset`
   ///     (base-game slots, name uses 2-digit numbering), **or**
-  ///   * a cloned-from-preceding-base-slot uasset (custom 3-digit slots).
+  ///   * a cloned-from-preceding-base-slot uasset (custom 3-digit slots), **or**
+  ///   * a cross-genre clone of `T_New_Hor_01.uasset` (T_New slot in a genre
+  ///     with `newCount==0`, e.g. Romance/Western — RR_VHS_Tool.py:5745-5793).
   ///
-  /// Mirrors the search order in RR_VHS_Tool.py:5697-5740.
+  /// Mirrors the search order in RR_VHS_Tool.py:5697-5793.
   Future<Uint8List> _resolveUasset({
     required String baseDir,
+    String? horBaseDir,
     required String textureName,
     required String genreCode,
     required int dstSlotNum,
+    required bool isNewRelease,
   }) async {
     final direct = File(p.join(baseDir, '$textureName.uasset'));
     if (await direct.exists()) {
@@ -307,7 +330,7 @@ class TextureInjectorImpl implements TextureInjector {
       (g) => g.code == genreCode,
       orElse: () => throw StateError('Unknown genre code "$genreCode"'),
     );
-    final baseCount = genre.bkgCount;
+    final baseCount = isNewRelease ? genre.newCount : genre.bkgCount;
 
     for (var candNum = dstSlotNum - 1; candNum > 0; candNum--) {
       final candName = candNum < 100
@@ -327,11 +350,13 @@ class TextureInjectorImpl implements TextureInjector {
       if (candNum <= baseCount) break;
     }
 
-    // Fallback: clone from the genre's last base slot.  Only T_Bkg textures
-    // are reachable here in slice 3b; T_New / cross-genre cloning is slice 3c.
-    if (textureName.startsWith('T_Bkg_')) {
-      final lastBaseName =
-          '${_textureNameStem(textureName)}_${baseCount.toString().padLeft(2, '0')}';
+    // Fallback: clone from the genre's last base slot — same genre, no
+    // cross-genre patch yet.  Only fires for T_Bkg or for T_New genres with
+    // newCount > 0.
+    if (baseCount > 0) {
+      final lastBaseName = isNewRelease
+          ? '${_textureNameStem(textureName)}_${baseCount.toString().padLeft(2, '0')}'
+          : '${_textureNameStem(textureName)}_${baseCount.toString().padLeft(2, '0')}';
       final lastBaseFile = File(p.join(baseDir, '$lastBaseName.uasset'));
       if (await lastBaseFile.exists()) {
         final src = await lastBaseFile.readAsBytes();
@@ -345,9 +370,82 @@ class TextureInjectorImpl implements TextureInjector {
       }
     }
 
+    // Cross-genre fallback for T_New on newCount==0 genres (Romance/Western):
+    // clone T_New_Hor_01 from Horror's folder, retargeting genre code.
+    if (isNewRelease && horBaseDir != null) {
+      final horSrc = File(p.join(horBaseDir, 'T_New_Hor_01.uasset'));
+      if (await horSrc.exists()) {
+        final src = await horSrc.readAsBytes();
+        return cloneTexture3digit(
+          srcData: src,
+          srcCode: 'Hor',
+          srcNum: 1,
+          dstCode: genreCode,
+          dstNum: dstSlotNum,
+        );
+      }
+    }
+
     throw FileSystemException(
         'No base uasset and no clonable preceding slot for $textureName',
         baseDir);
+  }
+
+  /// Pick the right uexp bytes for [textureName].  Order:
+  ///   1. Direct file in [baseDir].
+  ///   2. T_New only: walk preceding NR slots in the same genre (the empty
+  ///      1702-byte template would zero out lower mips and break standee
+  ///      close-up rendering — RR_VHS_Tool.py:443).
+  ///   3. T_New only: cross-genre fallback to `T_New_Hor_01.uexp`.
+  ///   4. T_Bkg only: empty 1702-byte template.
+  Future<Uint8List> _resolveUexp({
+    required String baseDir,
+    String? horBaseDir,
+    required String textureName,
+    required int dstSlotNum,
+    required bool isNewRelease,
+  }) async {
+    final direct = File(p.join(baseDir, '$textureName.uexp'));
+    if (await direct.exists()) return direct.readAsBytes();
+
+    if (isNewRelease) {
+      // Walk preceding within-genre NR uexps.
+      for (var n = dstSlotNum - 1; n > 0; n--) {
+        final padded = n < 100 ? n.toString().padLeft(2, '0') : n.toString();
+        final cand = File(p.join(
+            baseDir, '${_textureNameStem(textureName)}_$padded.uexp'));
+        if (await cand.exists()) return cand.readAsBytes();
+      }
+      // Cross-genre fallback for newCount==0 genres.
+      if (horBaseDir != null) {
+        final horSrc = File(p.join(horBaseDir, 'T_New_Hor_01.uexp'));
+        if (await horSrc.exists()) return horSrc.readAsBytes();
+      }
+      throw FileSystemException(
+          'No base uexp and no clonable preceding slot for $textureName',
+          baseDir);
+    }
+
+    return kTBkgUexpTemplate;
+  }
+
+  /// For T_New on a genre with `newCount==0`, extract Horror's `T_Bkg_Hor`
+  /// folder so the caller can clone `T_New_Hor_01.*` cross-genre.  Returns
+  /// the extracted folder path, or null when not applicable.
+  Future<String?> _maybeExtractHorForCrossGenre(
+      AppConfig config, bool isNewRelease, String genreCode) async {
+    if (!isNewRelease) return null;
+    if (genreCode == 'Hor') return null;
+    final genre = kGenres.firstWhere((g) => g.code == genreCode,
+        orElse: () => throw StateError('Unknown genre code "$genreCode"'));
+    if (genre.newCount > 0) return null;
+    final res = await pakCache.extractFolder(
+        config, '$_kBackgroundPakPrefix/T_Bkg_Hor/');
+    if (!res.ok) {
+      throw StateError(
+          'Could not extract T_Bkg_Hor for cross-genre clone: ${res.warning}');
+    }
+    return res.path!;
   }
 }
 
