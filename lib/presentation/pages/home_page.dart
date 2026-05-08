@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_theme.dart';
 import '../providers/providers.dart';
 import '../widgets/genre_tab_bar.dart';
+import '../widgets/setup_dialog.dart';
 import '../widgets/slot_options_panel.dart';
 import '../widgets/slot_preview.dart';
 import '../widgets/texture_grid.dart';
@@ -22,21 +23,53 @@ import '../widgets/texture_grid.dart';
 ///
 /// The `shelf` width is fixed (≈ 4 cards wide) so the preview always has
 /// breathing room. Options are pinned to a 360px right rail.
-class HomePage extends ConsumerWidget {
+class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends ConsumerState<HomePage> {
+  bool _setupChecked = false;
+
+  /// Open the setup dialog if the loaded config doesn't point at real
+  /// files/dirs — first-launch flow.  Runs once per HomePage mount; the
+  /// re-entry button uses [_openSetup] directly.
+  Future<void> _maybeShowSetupOnLaunch() async {
+    if (_setupChecked) return;
+    _setupChecked = true;
+    final cfg = await ref.read(configFutureProvider.future);
+    if (cfg.isReady) return;
+    if (!mounted) return;
+    await SetupDialog.show(context, ref);
+  }
+
+  Future<void> _openSetup() async {
+    await SetupDialog.show(context, ref);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     // Kick off the layout-texture preload as soon as the app paints, so
     // the work happens in the background while the user navigates instead
     // of being deferred until they open a slot.  We intentionally don't
     // surface its AsyncValue here — failures degrade silently to
     // placeholder thumbnails inside LayoutStylePicker.
     ref.watch(layoutPreloadProvider);
+    // First frame: check config; if incomplete, pop the SetupDialog.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybeShowSetupOnLaunch();
+    });
     return Scaffold(
       appBar: AppBar(
         title: const _Wordmark(),
         actions: [
+          IconButton(
+            tooltip: 'Open setup dialog',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: _openSetup,
+          ),
           IconButton(
             tooltip: 'Reload custom_slots.json + replacements.json',
             icon: const Icon(Icons.refresh),

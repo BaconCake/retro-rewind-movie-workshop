@@ -26,19 +26,29 @@ import '../../domain/repositories/pak_builder.dart';
 import '../../domain/repositories/texture_repository.dart';
 import '../../domain/sku.dart';
 
-/// The directory the app treats as its working dir. We prefer the current
-/// working directory if it contains config.json — this is what `flutter run`
-/// gives us (project root), and it's also what the user gets when they
-/// launch a built .exe from its own folder. Otherwise we fall back to the
-/// directory containing the executable, matching the Python tool.
+/// The directory the app treats as its working dir.
+///
+/// Two scenarios to support:
+///   * **dev** — `flutter run` builds the exe under `<project>/build/.../Debug/`
+///     and runs it with `Directory.current` set to the project root.  The
+///     user keeps their `config.json` + `*_slots.json` + `replacements.json`
+///     in the project root, so we want to operate there.
+///   * **prod** — a packaged install: cwd is wherever the user launched
+///     from (could be anywhere), and the JSON state lives next to the
+///     bundled exe.  We want the exe directory.
+///
+/// Heuristic: if the exe lives **inside** the cwd (always true under
+/// `flutter run`), use cwd.  Otherwise use the exe's directory.  This is
+/// stable regardless of which JSON files happen to exist — the previous
+/// "look for config.json" probe broke first-launch when the user deleted
+/// config.json (see project_dev_workdir.md memory).
 final workingDirProvider = Provider<String>((ref) {
-  final cwd = Directory.current.path;
-  if (File(p.join(cwd, 'config.json')).existsSync()) return cwd;
-
   final exe = Platform.resolvedExecutable;
   if (exe.contains('flutter_tester') || exe.endsWith('dart.exe')) {
-    return cwd;
+    return Directory.current.path;
   }
+  final cwd = Directory.current.path;
+  if (p.isWithin(cwd, exe)) return cwd;
   return p.dirname(exe);
 });
 
