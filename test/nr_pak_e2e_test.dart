@@ -231,7 +231,9 @@ void main() {
       final assetRoot = p.join(unpackDir.path, 'RetroRewind', 'Content',
           'VideoStore', 'asset', 'prop');
       for (final s in slots) {
-        final nn = s.texNum.toString().padLeft(2, '0');
+        // MI uses 3-digit naming (v1.8.2 — slice 2a.2): MI_New_<code>_<NN:03d>
+        // even though bkg_tex still uses 2-digit until slice 2a.5 lands.
+        final nn = s.texNum.toString().padLeft(3, '0');
         final mi = p.join(assetRoot, 'vhs', 'Background',
             'T_Bkg_${s.genreCode}', 'MI_New_${s.genreCode}_$nn');
         expectFile('$mi.uasset', 'MI uasset missing for ${s.bkgTex}');

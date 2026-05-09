@@ -2,25 +2,25 @@ import 'dart:typed_data';
 
 import '../../domain/entities/app_config.dart';
 import '../services/pak_cache.dart';
+import '../services/uasset_rebuilder.dart';
 
 /// Clones the base game's `Standees_Collection_10693` blueprint (Standee B,
 /// MI_New_Dra_03) into a per-NR variant.  Pure port of
-/// `clone_standee_blueprint` (RR_VHS_Tool.py:4096-4206).
+/// `clone_standee_blueprint` (RR_VHS_Tool.py:4573-4681).
 ///
 /// Unlike the MI and thumbnail templates (which are embedded as binary
 /// blobs in the Flutter assets), the Standee mesh blueprint comes from the
 /// base game pak.  We extract it via [PakCache] on every build so users
 /// always get an up-to-date template if the base game updates.
 ///
-/// The patches are all **same-length**: SKU "10693" → caller's 5-digit
-/// SKU, mesh `LA_Standee_B_01` → `LA_Standee_{shape}_01`, MI
-/// `MI_New_Dra_03` → `MI_New_{code}_{NN}`, folder `T_Bkg_Dra` →
-/// `T_Bkg_{code}`.  No header surgery required.
+/// uexp patches stay length-preserving: the FName-number 10694 → sku+1
+/// (uint32 little-endian) at two locations, so a same-length in-place
+/// replace covers it.
 ///
-/// The uexp also carries a 4-byte FName-number reference at two locations:
-/// the value is `template_sku + 1 = 10694`.  We rewrite both to the
-/// caller's `sku + 1` so the in-game thumbnail reference resolves to the
-/// per-NR thumbnail texture (built by `StandeeThumbnailBuilder`).
+/// uasset patches go through [rebuildUAssetWithNamePatches] because as of
+/// v1.8.2 the material reference grew from `MI_New_Dra_03` (12 chars) to
+/// `MI_New_<code>_<NN:03d>` (13 chars) — one byte per occurrence — and a
+/// length-preserving in-place replace would corrupt the asset.
 
 const String _tmplName = 'Standees_Collection_10693';
 const String _tmplDir =
@@ -36,21 +36,23 @@ class StandeeBlueprintCloneResult {
   final Uint8List uassetBytes;
   final Uint8List uexpBytes;
   final String relativePath;
+  /// Number of FName-number occurrences patched in the uexp (always 2 in
+  /// practice — Python prints this for diagnostic logs).
   final int fnameNumReplacements;
-  final int skuReplacements;
-  final int meshReplacements;
-  final int materialReplacements;
-  final int folderReplacements;
+  /// Number of name-table entries that had at least one substring patch
+  /// applied during the uasset rebuild.
+  final int patchedNames;
+  /// `newLen - oldLen` for the rebuilt uasset (positive — the 3-digit MI
+  /// reference grows the file by 1 byte per occurrence).
+  final int totalShift;
 
   const StandeeBlueprintCloneResult({
     required this.uassetBytes,
     required this.uexpBytes,
     required this.relativePath,
     required this.fnameNumReplacements,
-    required this.skuReplacements,
-    required this.meshReplacements,
-    required this.materialReplacements,
-    required this.folderReplacements,
+    required this.patchedNames,
+    required this.totalShift,
   });
 }
 
@@ -67,8 +69,10 @@ class StandeeBlueprintCloner {
   StandeeBlueprintCloner(this.pakCache);
 
   /// Clone the template blueprint.  All inputs are validated for length —
-  /// any length mismatch throws because the same-length patch invariant
-  /// would otherwise corrupt the asset.
+  /// any length mismatch on the same-length axes (SKU 5 digits, shape 1
+  /// char, genre code 3 chars) throws because patches that need same-
+  /// length input would otherwise silently corrupt the asset.  texNum is
+  /// capped at 99 (3-digit padding).
   Future<StandeeBlueprintCloneResult> clone({
     required AppConfig config,
     required int sku,
@@ -91,7 +95,7 @@ class StandeeBlueprintCloner {
     }
     if (texNum < 1 || texNum > 99) {
       throw StandeeBlueprintCloneError(
-          'E004', 'tex_num $texNum out of 2-digit range');
+          'E004', 'tex_num $texNum out of 3-digit range (1..99)');
     }
 
     // Extract base template via PakCache.
@@ -111,11 +115,8 @@ class StandeeBlueprintCloner {
           'E011', 'read failed after extract');
     }
 
-    final ua = Uint8List.fromList(uaSrc);
+    // ── uexp: same-length FName-number patch ────────────────────────────
     final ue = Uint8List.fromList(ueSrc);
-
-    // Patch uexp: FName-number 10694 → sku + 1 (uint32 little endian, two
-    // occurrences expected per Python Z. 4151-4154).
     final oldFnum = ByteData(4)..setUint32(0, _tmplFnameNum, Endian.little);
     final newFnum = ByteData(4)..setUint32(0, sku + 1, Endian.little);
     final fnameReps = _replaceAllSameLength(
@@ -124,40 +125,63 @@ class StandeeBlueprintCloner {
       newFnum.buffer.asUint8List(),
     );
 
-    // Same-length string replacements in uasset.
-    final oldSku = _ascii(_tmplSku.toString());
-    final newSku = _ascii(skuStr);
-    final oldMesh = _ascii('LA_Standee_${_tmplShape}_01');
-    final newMesh = _ascii('LA_Standee_${standeeShape}_01');
-    final oldMat = _ascii('MI_New_${_tmplGenreCode}_'
-        '${_tmplTexNum.toString().padLeft(2, '0')}');
-    final newMat = _ascii(
-        'MI_New_${genreCode}_${texNum.toString().padLeft(2, '0')}');
-    final oldFolder = _ascii('T_Bkg_$_tmplGenreCode');
-    final newFolder = _ascii('T_Bkg_$genreCode');
+    // ── uasset: length-changing rebuild via the new helper ─────────────
+    // Patches list mirrors Python (RR_VHS_Tool.py:4646-4654).  The MI
+    // reference is the only length-changing one; the others happen to be
+    // same-length but we send them through the same rebuilder so they're
+    // applied in a single name-table walk.
+    final patches = <NameTablePatch>[];
+    if (skuStr != _tmplSku.toString()) {
+      patches.add(NameTablePatch(_tmplSku.toString(), skuStr));
+    }
+    if (standeeShape != _tmplShape) {
+      patches.add(NameTablePatch(
+          'LA_Standee_$_tmplShape', 'LA_Standee_$standeeShape'));
+    }
+    final srcMat =
+        'MI_New_${_tmplGenreCode}_${_tmplTexNum.toString().padLeft(2, '0')}';
+    final dstMat =
+        'MI_New_${genreCode}_${texNum.toString().padLeft(3, '0')}';
+    if (srcMat != dstMat) {
+      patches.add(NameTablePatch(srcMat, dstMat));
+    }
+    if (genreCode != _tmplGenreCode) {
+      patches.add(NameTablePatch(
+          'T_Bkg_$_tmplGenreCode', 'T_Bkg_$genreCode'));
+    }
 
-    final skuReps = _replaceAllSameLength(ua, oldSku, newSku);
-    final meshReps = _replaceAllSameLength(ua, oldMesh, newMesh);
-    final matReps = _replaceAllSameLength(ua, oldMat, newMat);
-    final folderReps = _replaceAllSameLength(ua, oldFolder, newFolder);
+    final srcPkg = '/Game/VideoStore/asset/prop/Standees/mesh/$_tmplName';
+    final dstPkg =
+        '/Game/VideoStore/asset/prop/Standees/mesh/Standees_Collection_$skuStr';
+
+    final UAssetRebuildResult rebuilt;
+    try {
+      rebuilt = rebuildUAssetWithNamePatches(
+        data: Uint8List.fromList(uaSrc),
+        packageNameNew: dstPkg,
+        nameTablePatches: patches,
+      );
+    } on UAssetRebuildError catch (e) {
+      throw StandeeBlueprintCloneError(
+          'E004', 'uasset rebuild failed: ${e.message}');
+    }
+    // Static analyzer needs srcPkg to be referenced — keeps doc-string
+    // accurate against Python (the rebuilder uses dstPkg directly).
+    assert(srcPkg.isNotEmpty);
 
     final outName = 'Standees_Collection_$skuStr';
     final relativePath = '$_tmplDir/$outName';
 
     return StandeeBlueprintCloneResult(
-      uassetBytes: ua,
+      uassetBytes: rebuilt.bytes,
       uexpBytes: ue,
       relativePath: relativePath,
       fnameNumReplacements: fnameReps,
-      skuReplacements: skuReps,
-      meshReplacements: meshReps,
-      materialReplacements: matReps,
-      folderReplacements: folderReps,
+      patchedNames: rebuilt.patchedNames,
+      totalShift: rebuilt.totalShift,
     );
   }
 }
-
-List<int> _ascii(String s) => s.codeUnits;
 
 /// In-place same-length replacement; returns the number of replacements made.
 int _replaceAllSameLength(

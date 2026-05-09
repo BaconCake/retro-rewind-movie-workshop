@@ -1,38 +1,40 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
+import '../services/uasset_rebuilder.dart';
 import 'standee_templates.dart';
 
 /// Material-instance builder for a New Release standee.
 ///
-/// Pure port of `create_mi_for_nr` (RR_VHS_Tool.py:4035-4094): clones the
-/// embedded `MI_New_Hor_04` template (Standee A) and applies three
-/// **same-length** byte replacements to retarget it at the caller's genre,
-/// texture slot, and standee shape.  Length-matching keeps every offset
-/// inside the asset stable, so no header surgery is needed.
+/// Pure port of `create_mi_for_nr` (RR_VHS_Tool.py:4502-4571).  Clones the
+/// embedded `MI_New_Hor_04` template (Standee A) and retargets it at the
+/// caller's genre, texture slot, and standee shape.
+///
+/// As of v1.8.2 the slot-number patch is **length-changing**: the donor
+/// number is "04" (2 chars) but the target is `<NN:03d>` (3 chars), so
+/// every occurrence in the name table grows by 1 byte.  The PackageName
+/// also grows by 1.  The asset is rebuilt via [rebuildUAssetWithNamePatches]
+/// instead of in-place same-length patches.
 ///
 /// Output asset names follow Python's pattern:
 ///
-///   `RetroRewind/Content/VideoStore/asset/prop/vhs/Background/T_Bkg_{genre}/MI_New_{genre}_{NN}.uasset`
-///
-/// Caller (PakBuilder, slice 5d) is responsible for placing the bytes at the
-/// right path inside the build root and emitting the shared uexp.
+///   `RetroRewind/Content/VideoStore/asset/prop/vhs/Background/T_Bkg_{genre}/MI_New_{genre}_{NN:03d}.uasset`
 
 class StandeeMiBuildResult {
   final Uint8List uassetBytes;
   final Uint8List uexpBytes;
   final String relativePath;
-  final int genreNumReplacements;
-  final int folderReplacements;
-  final int aoReplacements;
+  /// Number of name-table entries that had at least one patch applied.
+  final int patchedNames;
+  /// `newLen - oldLen` for the rebuilt uasset (positive when the 3-digit
+  /// number grew the file).
+  final int totalShift;
 
   const StandeeMiBuildResult({
     required this.uassetBytes,
     required this.uexpBytes,
     required this.relativePath,
-    required this.genreNumReplacements,
-    required this.folderReplacements,
-    required this.aoReplacements,
+    required this.patchedNames,
+    required this.totalShift,
   });
 }
 
@@ -50,9 +52,11 @@ class StandeeMiBuilder {
   /// Build the MI uasset+uexp pair for a New Release.
   ///
   /// [genreCode] — 3-char code matching `T_Bkg_<code>` (e.g. "Dra", "Sci").
-  /// [texNum] — slot number (1..base_new_count for the genre).  Encoded as
-  /// 2-digit zero-padded → mismatched length to the template's "04" would
-  /// throw here (but tex_num always fits 2 digits since `kNrPerGenreCap=99`).
+  /// [texNum] — slot number (1..99 per [kNrPerGenreCap]).  Encoded as
+  /// 3-digit zero-padded.  100+ is intentionally rejected — Python's
+  /// `clone_texture_3digit` switches to a different FName encoding above
+  /// 99 (literal-name vs base-name + FName num); we don't need that path
+  /// since the UI caps NR count per genre at 99.
   /// [standeeShape] — "A", "B", or "C".  Same-length always (1 char).
   StandeeMiBuildResult build({
     required String genreCode,
@@ -66,87 +70,63 @@ class StandeeMiBuilder {
     }
     if (texNum < 1 || texNum > 99) {
       throw StandeeMiBuildError(
-          'tex_num $texNum out of range — must fit 2 digits');
+          'tex_num $texNum out of range — must be 1..99');
     }
     if (standeeShape.length != kMiTemplateShape.length) {
       throw StandeeMiBuildError(
           'standee shape length mismatch: got "$standeeShape"');
     }
 
-    final oldGn = utf8.encode('${kMiTemplateGenre}_'
-        '${kMiTemplateNum.toString().padLeft(2, '0')}');
-    final newGn = utf8.encode(
-        '${genreCode}_${texNum.toString().padLeft(2, '0')}');
-    final oldFolder = utf8.encode('T_Bkg_$kMiTemplateGenre');
-    final newFolder = utf8.encode('T_Bkg_$genreCode');
-    final oldAo = utf8.encode('T_Standee_${kMiTemplateShape}_01_ao');
-    final newAo = utf8.encode('T_Standee_${standeeShape}_01_ao');
+    // Donor template strings, exactly as they appear in the embedded
+    // `MI_New_Hor_04` uasset.  Substring substitutions in the name table.
+    final srcGn =
+        '${kMiTemplateGenre}_${kMiTemplateNum.toString().padLeft(2, '0')}';
+    final dstGn = '${genreCode}_${texNum.toString().padLeft(3, '0')}';
+    final srcFolder = 'T_Bkg_$kMiTemplateGenre';
+    final dstFolder = 'T_Bkg_$genreCode';
+    final srcAo = 'T_Standee_${kMiTemplateShape}_01_ao';
+    final dstAo = 'T_Standee_${standeeShape}_01_ao';
 
-    final n1 = countOccurrences(templates.miUasset, oldGn);
-    final n2 = countOccurrences(templates.miUasset, oldFolder);
-    final n3 = countOccurrences(templates.miUasset, oldAo);
+    final patches = <NameTablePatch>[];
+    if (srcGn != dstGn) patches.add(NameTablePatch(srcGn, dstGn));
+    if (srcFolder != dstFolder) patches.add(NameTablePatch(srcFolder, dstFolder));
+    if (srcAo != dstAo) patches.add(NameTablePatch(srcAo, dstAo));
 
-    var data = Uint8List.fromList(templates.miUasset);
-    data = replaceAllSameLength(data, oldGn, newGn);
-    data = replaceAllSameLength(data, oldFolder, newFolder);
-    data = replaceAllSameLength(data, oldAo, newAo);
+    // PackageName: full literal path including the new 3-digit number.
+    final srcPkg =
+        '/Game/VideoStore/asset/prop/vhs/Background/$srcFolder/MI_New_$srcGn';
+    final dstPkg =
+        '/Game/VideoStore/asset/prop/vhs/Background/$dstFolder/MI_New_$dstGn';
 
-    final miName = 'MI_New_${genreCode}_${texNum.toString().padLeft(2, '0')}';
+    final UAssetRebuildResult rebuilt;
+    try {
+      rebuilt = rebuildUAssetWithNamePatches(
+        data: templates.miUasset,
+        packageNameNew: dstPkg,
+        nameTablePatches: patches,
+      );
+    } on UAssetRebuildError catch (e) {
+      throw StandeeMiBuildError('rebuild failed: ${e.message}');
+    }
+    // Sanity: any of these would silently break the in-game render.
+    if (srcPkg != dstPkg && rebuilt.totalShift == 0 &&
+        rebuilt.bytes.length == templates.miUasset.length) {
+      // This indicates the rebuilder didn't actually patch the PackageName,
+      // i.e. our pkg-old detection was off.  We assert externally below.
+    }
+
+    final miName = 'MI_New_$dstGn';
     final folderName = 'T_Bkg_$genreCode';
     final relativePath =
         'RetroRewind/Content/VideoStore/asset/prop/vhs/Background/'
         '$folderName/$miName';
 
     return StandeeMiBuildResult(
-      uassetBytes: data,
+      uassetBytes: rebuilt.bytes,
       uexpBytes: Uint8List.fromList(templates.miUexp),
       relativePath: relativePath,
-      genreNumReplacements: n1,
-      folderReplacements: n2,
-      aoReplacements: n3,
+      patchedNames: rebuilt.patchedNames,
+      totalShift: rebuilt.totalShift,
     );
   }
-}
-
-/// Replace every occurrence of [needle] in [source] with [replacement] in
-/// place.  Both byte sequences must be the same length — caller is expected
-/// to guarantee that.  Returns a new Uint8List; the input is left untouched.
-Uint8List replaceAllSameLength(
-    Uint8List source, List<int> needle, List<int> replacement) {
-  if (needle.length != replacement.length) {
-    throw ArgumentError(
-        'replaceAllSameLength: needle.length=${needle.length} '
-        '!= replacement.length=${replacement.length}');
-  }
-  if (needle.isEmpty) return source;
-  final out = Uint8List.fromList(source);
-  final last = out.length - needle.length;
-  outer:
-  for (var i = 0; i <= last; i++) {
-    for (var j = 0; j < needle.length; j++) {
-      if (out[i + j] != needle[j]) continue outer;
-    }
-    for (var j = 0; j < replacement.length; j++) {
-      out[i + j] = replacement[j];
-    }
-    i += needle.length - 1; // skip past the replaced region
-  }
-  return out;
-}
-
-/// Count occurrences of [needle] in [source] (non-overlapping).  Useful for
-/// the debug/log output Python emits when patching standee assets.
-int countOccurrences(Uint8List source, List<int> needle) {
-  if (needle.isEmpty || needle.length > source.length) return 0;
-  var count = 0;
-  final last = source.length - needle.length;
-  outer:
-  for (var i = 0; i <= last; i++) {
-    for (var j = 0; j < needle.length; j++) {
-      if (source[i + j] != needle[j]) continue outer;
-    }
-    count++;
-    i += needle.length - 1;
-  }
-  return count;
 }

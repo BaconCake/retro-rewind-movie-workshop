@@ -59,11 +59,15 @@ void main() {
       expect(t.miUexp.length, 33471);
     });
 
-    test('build produces same-size uasset; uexp passes through unchanged',
-        () async {
+    test('build grows uasset by one byte per Hor_04 occurrence; uexp '
+        'passes through unchanged', () async {
       final t = await _loadTemplatesFromDisk();
       final r = builder.build(genreCode: 'Sci', texNum: 7, standeeShape: 'C');
-      expect(r.uassetBytes.length, t.miUasset.length);
+      // 3-digit migration (v1.8.2): "Hor_04" (6 chars) → "Sci_007" (7 chars)
+      // grows the uasset by 1 byte per occurrence.  Other patches are
+      // same-length.  PackageName also grows by 1.
+      expect(r.totalShift, greaterThan(0));
+      expect(r.uassetBytes.length, t.miUasset.length + r.totalShift);
       expect(r.uexpBytes, t.miUexp);
     });
 
@@ -80,26 +84,27 @@ void main() {
           isFalse,
           reason: 'old AO texture leaked');
 
-      // Target strings should be present.
-      expect(_bytesContain(r.uassetBytes, 'Sci_07'.codeUnits), isTrue);
+      // Target strings should be present (3-digit naming).
+      expect(_bytesContain(r.uassetBytes, 'Sci_007'.codeUnits), isTrue);
       expect(_bytesContain(r.uassetBytes, 'T_Bkg_Sci'.codeUnits), isTrue);
       expect(_bytesContain(r.uassetBytes, 'T_Standee_C_01_ao'.codeUnits),
           isTrue);
     });
 
-    test('replacement counts are non-zero for every patch', () {
+    test('patchedNames > 0 — at least one name-table entry got rewritten', () {
       final r = builder.build(genreCode: 'Dra', texNum: 1, standeeShape: 'B');
-      expect(r.genreNumReplacements, greaterThan(0));
-      expect(r.folderReplacements, greaterThan(0));
-      expect(r.aoReplacements, greaterThan(0));
+      expect(r.patchedNames, greaterThan(0));
     });
 
-    test('relativePath follows the Python convention', () {
+    test('relativePath follows the Python 3-digit convention', () {
       final r = builder.build(genreCode: 'Hor', texNum: 4, standeeShape: 'A');
+      // texNum=4 with the Hor donor → "Hor_004" (3-digit), even though
+      // donor template is "Hor_04".  Going from donor to target always
+      // hits the rebuilder (Hor_04 → Hor_004 is a 6→7 char patch).
       expect(
           r.relativePath,
           'RetroRewind/Content/VideoStore/asset/prop/vhs/Background/'
-          'T_Bkg_Hor/MI_New_Hor_04');
+          'T_Bkg_Hor/MI_New_Hor_004');
     });
 
     test('rejects length-mismatched genre code', () {
@@ -218,7 +223,7 @@ void main() {
       fixturesAvailable = true;
     });
 
-    test('clones blueprint and applies all same-length patches', () async {
+    test('clones blueprint and applies all v1.8.2 (3-digit) patches', () async {
       if (!fixturesAvailable) {
         markTestSkipped('base game pak unavailable');
         return;
@@ -232,22 +237,22 @@ void main() {
         texNum: 7,
       );
 
-      // Counts must be > 0 for every patch — Python prints these for debug.
+      // uexp FName-num: 2 occurrences of 10694 are uint32-replaced in place.
       expect(r.fnameNumReplacements, 2,
           reason: 'expected 2 occurrences of FName=10694 in uexp');
-      expect(r.skuReplacements, greaterThan(0));
-      expect(r.meshReplacements, greaterThan(0));
-      expect(r.materialReplacements, greaterThan(0));
-      expect(r.folderReplacements, greaterThan(0));
+      // uasset: at least one name-table entry was rewritten (the MI ref
+      // grew Dra_03→Sci_007 by 1 byte).  totalShift > 0 because of that.
+      expect(r.patchedNames, greaterThan(0));
+      expect(r.totalShift, greaterThan(0));
 
-      // Source strings are gone, target strings present.
+      // Source strings are gone, target strings present (3-digit naming).
       expect(_bytesContain(r.uassetBytes, '10693'.codeUnits), isFalse);
       expect(_bytesContain(r.uassetBytes, '51234'.codeUnits), isTrue);
       expect(_bytesContain(r.uassetBytes, 'LA_Standee_B_01'.codeUnits),
           isFalse);
       expect(_bytesContain(r.uassetBytes, 'LA_Standee_C_01'.codeUnits), isTrue);
       expect(_bytesContain(r.uassetBytes, 'MI_New_Dra_03'.codeUnits), isFalse);
-      expect(_bytesContain(r.uassetBytes, 'MI_New_Sci_07'.codeUnits), isTrue);
+      expect(_bytesContain(r.uassetBytes, 'MI_New_Sci_007'.codeUnits), isTrue);
       expect(_bytesContain(r.uassetBytes, 'T_Bkg_Dra'.codeUnits), isFalse);
       expect(_bytesContain(r.uassetBytes, 'T_Bkg_Sci'.codeUnits), isTrue);
 
