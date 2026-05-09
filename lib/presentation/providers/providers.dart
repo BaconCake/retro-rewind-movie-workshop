@@ -341,19 +341,33 @@ final slotsControllerProvider = Provider<SlotsController>(
   (ref) => SlotsController(ref),
 );
 
-/// New Release slots from `nr_custom_slots.json`. Applies the genre_byte
-/// auto-fix on load (Python Z. 2055-2067) and re-persists when any slot
-/// was corrected, so a stale byte gets healed at the next launch instead
-/// of waiting for the user to edit the file.
+/// New Release slots from `nr_custom_slots.json`.  Runs the three load-
+/// time migrations Python performs (RR_VHS_Tool.py:2055-2113) and re-
+/// persists when any of them mutated the list, so legacy quirks heal
+/// at next launch instead of waiting for the user to edit the file:
+///
+///   1. `applyGenreByteAutoFix` — corrects stale `genre_byte` values
+///      from older tool runs (Python Z. 2055-2067).
+///   2. `applyDuplicateTexNumRenumber` — renumbers duplicate `tex_num`
+///      within a genre (legacy modulo bug from pre-v1.8.2 — Python
+///      Z. 2072-2090).
+///   3. `applyBkgTex3DigitMigration` — rewrites 2-digit `bkg_tex`
+///      values to the v1.8.2 3-digit format (Python Z. 2091-2107).
 final nrSlotsProvider = FutureProvider<List<NewReleaseSlot>>((ref) async {
   final dir = ref.watch(workingDirProvider);
   final ds = NrSlotsDataSource(dir);
   final raw = await ds.load();
+
   final fixed = applyGenreByteAutoFix(raw);
-  if (fixed.fixed > 0) {
-    await ds.save(fixed.slots);
+  final renumbered = applyDuplicateTexNumRenumber(fixed.slots);
+  final migrated = applyBkgTex3DigitMigration(renumbered.slots);
+
+  if (fixed.fixed > 0 ||
+      renumbered.renumbered > 0 ||
+      migrated.migrated > 0) {
+    await ds.save(migrated.slots);
   }
-  return fixed.slots;
+  return migrated.slots;
 });
 
 /// Mutator for `nr_custom_slots.json`.  Same load → mutate → save →

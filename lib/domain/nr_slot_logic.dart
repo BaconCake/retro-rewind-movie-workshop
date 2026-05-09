@@ -82,7 +82,7 @@ AddNrResult addNrSlot({
   }
   texNum ??= (perGenreCount % slotCount) + 1;
 
-  final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(2, '0')}';
+  final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(3, '0')}';
 
   // SKU: uniform-random unused id in [kNrSkuMin..kNrSkuMax].
   final usedSkus = {for (final s in existing) s.sku};
@@ -161,7 +161,7 @@ NewReleaseSlot? changeNrSlotGenre({
   }
   texNum ??= (usedTexNums.length % baseNewCount) + 1;
 
-  final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(2, '0')}';
+  final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(3, '0')}';
 
   return slot.copyWith(
     genre: newGenre,
@@ -190,5 +190,85 @@ NewReleaseSlot? changeNrSlotGenre({
     }
   }
   return (slots: out, fixed: fixed);
+}
+
+/// Auto-repair for legacy data: when two NRs in the same genre share a
+/// `texNum` (the pre-v1.8.2 modulo allocator could pick already-used
+/// slot numbers after a deletion), keep the FIRST occurrence and
+/// renumber later duplicates to the next free slot in 1..999.  Pure
+/// port of the renumber loop in Python's `_load_nr_slots`
+/// (RR_VHS_Tool.py:2072-2090).
+///
+/// Renumbered slots also get their [bkgTex] rewritten to the 3-digit
+/// form `T_New_<code>_<NN:03d>`, matching Python.  Slots with an
+/// invalid [texNum] (`< 1`) are renumbered too.  Caller decides whether
+/// to re-persist (the count > 0 case).
+///
+/// Operates per-genre — duplicates across genres are unaffected (a
+/// `tex_num` collision between Drama and Horror is fine because each
+/// genre has its own T_New texture set).
+({List<NewReleaseSlot> slots, int renumbered}) applyDuplicateTexNumRenumber(
+  List<NewReleaseSlot> slots,
+) {
+  // genre → set of tex_nums kept so far.
+  final seenPerGenre = <String, Set<int>>{};
+  var renumbered = 0;
+  final out = <NewReleaseSlot>[];
+  for (final s in slots) {
+    final used = seenPerGenre.putIfAbsent(s.genre, () => <int>{});
+    if (s.texNum < 1 || used.contains(s.texNum)) {
+      // Pick the next free slot in 1..999 (Python uses range(1, 1000)).
+      var newT = 1;
+      while (used.contains(newT)) {
+        newT++;
+        if (newT >= 1000) break;
+      }
+      // genreCode is the source of truth for the bkgTex prefix; if it's
+      // empty (shouldn't happen post-load) we leave bkgTex as-is.
+      final newBkgTex = s.genreCode.isEmpty
+          ? s.bkgTex
+          : 'T_New_${s.genreCode}_${newT.toString().padLeft(3, '0')}';
+      out.add(s.copyWith(texNum: newT, bkgTex: newBkgTex));
+      used.add(newT);
+      renumbered++;
+    } else {
+      out.add(s);
+      used.add(s.texNum);
+    }
+  }
+  return (slots: out, renumbered: renumbered);
+}
+
+/// Migrate legacy 2-digit `bkg_tex` values (`T_New_Hor_05`) to the
+/// v1.8.2 3-digit format (`T_New_Hor_005`).  Pure port of Python's
+/// migration loop (RR_VHS_Tool.py:2091-2107).  3-digit bypasses UE's
+/// AssetRegistry bottleneck — UE resolves 3-digit names via pak
+/// filename lookup, so custom NR slots beyond the base game count
+/// actually load in-game.
+///
+/// Only changes the [bkgTex] string; [texNum] is preserved verbatim.
+/// Slots with an empty [genreCode] or invalid [texNum] are left
+/// untouched (defensive — those should be filtered upstream by
+/// [applyDuplicateTexNumRenumber]).
+({List<NewReleaseSlot> slots, int migrated}) applyBkgTex3DigitMigration(
+  List<NewReleaseSlot> slots,
+) {
+  var migrated = 0;
+  final out = <NewReleaseSlot>[];
+  for (final s in slots) {
+    if (s.genreCode.isEmpty || s.texNum < 1) {
+      out.add(s);
+      continue;
+    }
+    final expected =
+        'T_New_${s.genreCode}_${s.texNum.toString().padLeft(3, '0')}';
+    if (s.bkgTex != expected) {
+      out.add(s.copyWith(bkgTex: expected));
+      migrated++;
+    } else {
+      out.add(s);
+    }
+  }
+  return (slots: out, migrated: migrated);
 }
 
