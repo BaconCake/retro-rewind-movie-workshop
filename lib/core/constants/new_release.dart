@@ -49,3 +49,30 @@ const int kNrPerGenreCap = 99;
 /// existing movies.
 const int kNrSkuMin = 50000;
 const int kNrSkuMax = 59999;
+
+/// Number of base-game 2-digit `T_New_<code>_<NN>` textures shipped per
+/// genre.  Pure port of `GENRES["new"]` (RR_VHS_Tool.py:1937).
+///
+/// Drives the Legacy 2-digit Co-Inject path (v1.8.2.1 / v1.8.2.2):
+///   * `tex_num <= count` → extract the donor 2-digit asset from the base
+///     pak via [PakCache.prepareNrLegacy2digit] and inject the user cover
+///     into both 3-digit and 2-digit slots.
+///   * `tex_num > count` → out-of-range; v1.8.2.2 will synthesize the
+///     missing 2-digit asset by length-preserving clone of `T_New_Hor_01`.
+///
+/// Matches [kNrGenreByte] keys exactly: every NR-eligible genre has an
+/// entry here (Romance/Western are 0 because their NRs are warning-only,
+/// they have no base T_New textures to either extract or be cloned into).
+const Map<String, int> kBaseNewSlotCount = {
+  'Action':  3,
+  'Comedy':  1,
+  'Drama':   3,
+  'Fantasy': 2,
+  'Horror':  4,
+  'Kids':    1,
+  'Police':  1,
+  'Sci-Fi':  4,
+  'Xmas':    1,
+  'Romance': 0,
+  'Western': 0,
+};

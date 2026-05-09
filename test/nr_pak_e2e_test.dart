@@ -391,6 +391,26 @@ void main() {
         expect(_uexpHeadersEqual(ueBytes, kTBkgUexpTemplate), isFalse,
             reason: 'T_New uexp header equals T_Bkg empty template — '
                 'injector fell back to the wrong source');
+
+        // v1.8.2.1 legacy co-inject: Drama tex 1 is in-range (baseNew=3)
+        // so the build must ALSO produce a 2-digit T_New_Dra_01 slot
+        // alongside the 3-digit primary, for backward compat with
+        // pre-v1.8.2 saves whose FName refs are still 2-digit.
+        final legacyName =
+            'T_New_Dra_${slot.texNum.toString().padLeft(2, '0')}';
+        final legacyUa = File(p.join(base, '$legacyName.uasset'));
+        final legacyUe = File(p.join(base, '$legacyName.uexp'));
+        final legacyUb = File(p.join(base, '$legacyName.ubulk'));
+        expect(legacyUa.existsSync(), isTrue,
+            reason: 'legacy 2-digit uasset $legacyName missing — '
+                'v1.8.2.1 co-inject did not run');
+        expect(legacyUe.existsSync(), isTrue,
+            reason: 'legacy 2-digit uexp $legacyName missing');
+        expect(legacyUb.existsSync(), isTrue,
+            reason: 'legacy 2-digit ubulk $legacyName missing');
+        // Same DDS source feeds both injects — ubulk sizes must match.
+        expect(legacyUb.lengthSync(), ub.lengthSync(),
+            reason: 'legacy ubulk should be the same DDS bytes as primary');
       } finally {
         try {
           await tempDir.delete(recursive: true);
@@ -439,6 +459,15 @@ void main() {
             reason: 'cloned uasset missing target T_Bkg_Rom reference');
         expect(hasHor, isFalse,
             reason: 'cloned uasset still carries source T_Bkg_Hor reference');
+
+        // v1.8.2.1 co-inject is OOR for Romance (baseNew=0) — the legacy
+        // 2-digit slot must NOT be produced.  Change 2 (v1.8.2.2 OOR
+        // clone path) will fill this case via length-preserving clone of
+        // T_New_Hor_01, but slice 2a doesn't ship that yet.
+        final legacyUa = File(p.join(base, 'T_New_Rom_01.uasset'));
+        expect(legacyUa.existsSync(), isFalse,
+            reason: 'OOR legacy slot leaked — should be deferred to '
+                'Change 2 OOR clone path');
       } finally {
         try {
           await tempDir.delete(recursive: true);

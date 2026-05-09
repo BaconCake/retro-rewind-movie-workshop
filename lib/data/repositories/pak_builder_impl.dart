@@ -45,6 +45,17 @@ class _InjectTask {
 
 enum _InjectOutcome { injected, placeholder, failed }
 
+class _LegacyCoInjectTask {
+  final NewReleaseSlot slot;
+  final String legacyName;
+  final TextureReplacement replacement;
+  const _LegacyCoInjectTask({
+    required this.slot,
+    required this.legacyName,
+    required this.replacement,
+  });
+}
+
 /// Build pipeline.  Mirrors the Python `_build()` flow (RR_VHS_Tool.py:13860-
 /// 14150) operating in CUSTOM_ONLY_MODE: the mod pak only contains the genres
 /// the user has actually customised.  Genres without `custom_slots.json`
@@ -265,6 +276,17 @@ class PakBuilderImpl implements PakBuilder {
       // newCount>0 and acceptable as a "no cover yet" state).
       await _phase('NR textures', timings, () =>
           _writeNrTextures(config, workRoot.path, nrSlots, replacements));
+
+      // Legacy 2-digit co-inject (v1.8.2.1).  Pre-v1.8.2 saves persist NR
+      // FNames in the 2-digit form (`T_New_Sci_01`) at NR-purchase time,
+      // so v1.8.2's 3-digit-only writer leaves their shelf VHS blank on
+      // upgrade.  Mitigation: also write the cover into the legacy
+      // 2-digit slot.  In-range only for now — OOR cases (`tex_num >
+      // base_new_count`) get silently skipped pending Change 2 (v1.8.2.2
+      // clone path).
+      await _phase('NR legacy 2-digit', timings, () =>
+          _writeNrLegacyCoInject(
+              config, workRoot.path, nrSlots, replacements));
     } else {
       _log('No NR slots — skipping New Release DT + standees');
     }
@@ -557,14 +579,109 @@ class PakBuilderImpl implements PakBuilder {
       }
     }
 
-    final outcomes = await _runChunked<_InjectOutcome>(
-        tasks, _kInjectParallelism, runOne);
+    final outcomes =
+        await _runChunked(tasks, _kInjectParallelism, runOne);
     var injected = 0, failed = 0;
     for (final o in outcomes) {
       if (o == _InjectOutcome.injected) injected++;
       if (o == _InjectOutcome.failed) failed++;
     }
     _log('NR covers: $injected injected, $failed failed');
+  }
+
+  /// Co-inject legacy 2-digit NR cover slots (v1.8.2.1).  For every NR with
+  /// a custom cover and `tex_num <= base_new_count[genre]`, write the same
+  /// cover into the 2-digit slot `T_New_<code>_<NN:02d>` in addition to
+  /// the 3-digit primary that [_writeNrTextures] just produced.  Pure port
+  /// of Python's NR-Legacy loop (RR_VHS_Tool.py:14668-14712).
+  ///
+  /// Out-of-range (OOR) cases — when the user pushed `tex_num` past the
+  /// base count via JSON edits in v1.8.1 — are skipped here with a log
+  /// line.  v1.8.2.2's clone path (Change 2) will fill those by
+  /// synthesizing the missing 2-digit asset from `T_New_Hor_01`.
+  ///
+  /// Per-slot failures are non-fatal: log + continue.  An NR with a
+  /// missing 2-digit slot only affects pre-v1.8.2 saves; new saves use
+  /// the 3-digit slot already produced by [_writeNrTextures].
+  Future<void> _writeNrLegacyCoInject(
+      AppConfig config,
+      String workRoot,
+      List<NewReleaseSlot> nrSlots,
+      Map<String, TextureReplacement> replacements) async {
+    final eligible = <NewReleaseSlot>[];
+    var oorSkipped = 0;
+    for (final s in nrSlots) {
+      if (!kNrGenreByte.containsKey(s.genre)) continue;
+      if (!replacements.containsKey(s.bkgTex)) continue;
+      final baseNew = kBaseNewSlotCount[s.genre] ?? 0;
+      if (s.texNum < 1 || s.texNum > 99) continue;
+      if (s.texNum > baseNew) {
+        // OOR — defer to Change 2 (v1.8.2.2 clone path).
+        _log('  SKIP   NR-Legacy ${s.bkgTex}: tex_num ${s.texNum} '
+            '> base_new $baseNew (OOR, deferred to clone path)');
+        oorSkipped++;
+        continue;
+      }
+      eligible.add(s);
+    }
+    if (eligible.isEmpty) {
+      if (oorSkipped == 0) {
+        _log('No NR slots eligible for legacy 2-digit co-inject');
+      } else {
+        _log('NR legacy 2-digit: 0 in-range, $oorSkipped OOR skipped');
+      }
+      return;
+    }
+    _log('Co-injecting ${eligible.length} legacy 2-digit NR slot(s) '
+        '(parallelism=$_kInjectParallelism)...');
+
+    final tasks = [
+      for (final s in eligible)
+        _LegacyCoInjectTask(
+          slot: s,
+          legacyName: 'T_New_${s.genreCode}_'
+              '${s.texNum.toString().padLeft(2, '0')}',
+          replacement: replacements[s.bkgTex]!,
+        ),
+    ];
+
+    Future<_InjectOutcome> runOne(_LegacyCoInjectTask t) async {
+      try {
+        // Pull donor 2-digit asset trio into the cache.  In-range only —
+        // OOR was filtered above.
+        final prep = await _pakCache
+            .prepareNrLegacy2digit(config, t.slot.genreCode, t.slot.texNum);
+        if (!prep.ok) {
+          _log('  FAIL   NR-Legacy ${t.legacyName}: '
+              'donor extract failed: ${prep.warning}');
+          return _InjectOutcome.failed;
+        }
+        await _injector.inject(
+          config: config,
+          workRoot: workRoot,
+          textureName: t.legacyName,
+          genreCode: t.slot.genreCode,
+          replacement: t.replacement,
+        );
+        _log('  CO-INJ NR-Legacy ${t.legacyName}');
+        _step('Co-injected legacy ${t.legacyName}');
+        return _InjectOutcome.injected;
+      } catch (e) {
+        _log('  FAIL   NR-Legacy ${t.legacyName}: $e');
+        _step('Failed legacy ${t.legacyName}');
+        return _InjectOutcome.failed;
+      }
+    }
+
+    final outcomes =
+        await _runChunked(tasks, _kInjectParallelism, runOne);
+    var injected = 0, failed = 0;
+    for (final o in outcomes) {
+      if (o == _InjectOutcome.injected) injected++;
+      if (o == _InjectOutcome.failed) failed++;
+    }
+    _log('NR legacy 2-digit: $injected co-injected, $failed failed, '
+        '$oorSkipped OOR skipped');
   }
 
   Future<void> _writeTextures(
@@ -633,8 +750,8 @@ class PakBuilderImpl implements PakBuilder {
       }
     }
 
-    final outcomes = await _runChunked<_InjectOutcome>(
-        tasks, _kInjectParallelism, runOne);
+    final outcomes =
+        await _runChunked(tasks, _kInjectParallelism, runOne);
     for (final o in outcomes) {
       switch (o) {
         case _InjectOutcome.injected:
@@ -652,9 +769,9 @@ class PakBuilderImpl implements PakBuilder {
   /// Run [body] over [items] with at most [concurrency] futures in flight.
   /// Order of results matches [items]; per-item exceptions must be caught
   /// inside [body] (this helper does not isolate them).
-  Future<List<R>> _runChunked<R>(
-      List<_InjectTask> items, int concurrency,
-      Future<R> Function(_InjectTask) body) async {
+  Future<List<R>> _runChunked<R, T>(
+      List<T> items, int concurrency,
+      Future<R> Function(T) body) async {
     final results = List<R?>.filled(items.length, null);
     var next = 0;
 

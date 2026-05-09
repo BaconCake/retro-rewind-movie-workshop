@@ -174,6 +174,51 @@ class PakCache {
     return null;
   }
 
+  // ── Legacy 2-digit NR co-inject (v1.8.2.1) ─────────────────────────────
+  //
+  // Pre-v1.8.2 saves persist NR FNames in the **2-digit** form
+  // (`T_New_Sci_01`).  v1.8.2 switched the writer to 3-digit
+  // (`T_New_Sci_001`), so old saves' refs find nothing in the modded pak
+  // and shelves go blank.  Mitigation: for every NR with a custom cover,
+  // also write that cover into the 2-digit slot — Python's
+  // `prepare_nr_legacy_2digit_in_cache` (RR_VHS_Tool.py:2387).
+
+  /// Extract the donor 2-digit NR asset trio (`.uasset`, `.uexp`, `.ubulk`)
+  /// from the base pak so the legacy co-inject can write into it.  Pure
+  /// port of `prepare_nr_legacy_2digit_in_cache` (RR_VHS_Tool.py:2387).
+  ///
+  /// Idempotent: each call goes through [extractFile], which short-circuits
+  /// if the sidecar is already cached.  Caller is responsible for routing
+  /// OOR cases ([texNum] > base count for the genre) to the clone path
+  /// (v1.8.2.2 — separate helper, not implemented yet).
+  ///
+  /// Returns `PakCacheResult.ok` with the path of the `.uasset` once all
+  /// three sidecars are present; otherwise the warning from whichever
+  /// extraction failed.
+  Future<PakCacheResult> prepareNrLegacy2digit(
+    AppConfig config,
+    String genreCode,
+    int texNum,
+  ) async {
+    if (texNum < 1 || texNum > 99) {
+      return PakCacheResult.skipped(
+        'tex_num out of range: $texNum (expected 1..99)',
+      );
+    }
+    final nn = texNum.toString().padLeft(2, '0');
+    final assetBase =
+        'RetroRewind/Content/VideoStore/asset/prop/vhs/Background/'
+        'T_Bkg_$genreCode/T_New_${genreCode}_$nn';
+
+    int? sizeBytes;
+    for (final ext in const ['.uasset', '.uexp', '.ubulk']) {
+      final r = await extractFile(config, '$assetBase$ext');
+      if (!r.ok) return r;
+      if (ext == '.uasset') sizeBytes = r.sizeBytes;
+    }
+    return PakCacheResult.ok(_cachedPathFor('$assetBase.uasset'), sizeBytes);
+  }
+
   // ── Layout textures (slice 4f) ─────────────────────────────────────────
   //
   // Mirrors `PakCache.get_layout_texture` and `get_layout_texture_full`
