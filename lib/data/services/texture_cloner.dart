@@ -202,6 +202,167 @@ Uint8List cloneTexture3digit({
   return newData;
 }
 
+/// Length-preserving rename of a 2-digit T_New uasset.  Pure port of
+/// `_patch_legacy_2digit_uasset` (RR_VHS_Tool.py:2424-2481).
+///
+/// Renames `T_New_<srcCode>_<srcNum:02d>` → `T_New_<dstCode>_<dstNum:02d>`
+/// and the matching folder `T_Bkg_<srcCode>` → `T_Bkg_<dstCode>` in:
+///   * the PackageName FString at offset `0x24`,
+///   * every name-table entry that contains either substring.
+/// Touched name-table entries also get their FName hash zeroed so UE
+/// rehashes from the patched string at load (matches Python).
+///
+/// Donor and target short names are both 12 chars (`T_New_XXX_NN`),
+/// folders are both 9 chars (`T_Bkg_XXX`) — so all SerialOffsets and
+/// `serial_size` fields stay valid and the file is the same length as
+/// the input.  No header rewriting needed; we patch in place.
+///
+/// Used by the v1.8.2.2 OOR co-inject path: 2-digit slots beyond the
+/// genre's `base_new_count` don't exist in the base pak, so we synthesize
+/// them by cloning `T_New_Hor_01` (always extractable, Hor has
+/// `newCount=4`).  Throws [ArgumentError] when any rename would change
+/// length (sanity guard against future code changes — the caller's
+/// `srcCode`/`dstCode` must both be exactly 3 chars).
+Uint8List patchLegacy2DigitUasset({
+  required Uint8List srcData,
+  required String srcCode,
+  required int srcNum,
+  required String dstCode,
+  required int dstNum,
+}) {
+  final srcShort = 'T_New_${srcCode}_${_pad2(srcNum)}';
+  final dstShort = 'T_New_${dstCode}_${_pad2(dstNum)}';
+  final srcFolder = 'T_Bkg_$srcCode';
+  final dstFolder = 'T_Bkg_$dstCode';
+  if (srcShort.length != dstShort.length ||
+      srcFolder.length != dstFolder.length) {
+    throw ArgumentError(
+      'length-preserving rename requires equal lengths: '
+      '"$srcShort"->"$dstShort", "$srcFolder"->"$dstFolder"',
+    );
+  }
+  if (srcNum < 1 || srcNum > 99 || dstNum < 1 || dstNum > 99) {
+    throw ArgumentError(
+      'srcNum/dstNum must be in 1..99 (2-digit padding), '
+      'got srcNum=$srcNum dstNum=$dstNum',
+    );
+  }
+
+  final data = Uint8List.fromList(srcData);
+  final view = ByteData.sublistView(data);
+
+  final srcShortB = _utf8(srcShort);
+  final dstShortB = _utf8(dstShort);
+  final srcFolderB = _utf8(srcFolder);
+  final dstFolderB = _utf8(dstFolder);
+
+  // ── Patch PackageName FString (length-prefixed, NUL-terminated, at 0x24)
+  if (data.length < 0x24 + 4) {
+    throw ArgumentError('uasset too short to read PackageName length');
+  }
+  final pkgLen = view.getInt32(0x20, Endian.little);
+  if (pkgLen <= 0 || 0x24 + pkgLen > data.length) {
+    throw ArgumentError('invalid PackageName length: $pkgLen');
+  }
+  // pkgStr excludes the trailing NUL (Python: `pkg_str = data[0x24:0x24+pkg_len-1]`).
+  final pkgStr = data.sublist(0x24, 0x24 + pkgLen - 1);
+  final newPkg =
+      _replaceAll(_replaceAll(pkgStr, srcShortB, dstShortB), srcFolderB, dstFolderB);
+  if (newPkg.length != pkgStr.length) {
+    throw StateError('PackageName length changed unexpectedly');
+  }
+  data.setRange(0x24, 0x24 + newPkg.length, newPkg);
+
+  // ── Patch name table entries
+  final fse = 0x24 + pkgLen;
+  if (fse + 12 > data.length) {
+    throw ArgumentError('uasset too short to read name table header');
+  }
+  final nameCount = view.getInt32(fse + 4, Endian.little);
+  final nameOffset = view.getInt32(fse + 8, Endian.little);
+  if (nameOffset < fse || nameOffset > data.length) {
+    throw ArgumentError('invalid name_offset: $nameOffset');
+  }
+
+  var pos = nameOffset;
+  for (var i = 0; i < nameCount; i++) {
+    if (pos + 4 > data.length) break;
+    final slen = view.getInt32(pos, Endian.little);
+    if (slen <= 0 || slen > 500) break;
+    if (pos + 4 + slen + 4 > data.length) break;
+
+    final entryBytes = data.sublist(pos + 4, pos + 4 + slen);
+    final newBytes = _replaceAll(
+        _replaceAll(entryBytes, srcShortB, dstShortB), srcFolderB, dstFolderB);
+    if (!_byteListEqual(newBytes, entryBytes)) {
+      if (newBytes.length != entryBytes.length) {
+        throw StateError(
+          'name table entry length changed: ${_decodeUtf8Lossy(entryBytes)} -> '
+          '${_decodeUtf8Lossy(newBytes)}',
+        );
+      }
+      data.setRange(pos + 4, pos + 4 + slen, newBytes);
+      // Zero the 4-byte FName hash that follows; UE re-hashes on load.
+      view.setUint32(pos + 4 + slen, 0, Endian.little);
+    }
+    pos += 4 + slen + 4;
+  }
+
+  return data;
+}
+
+/// Replace every non-overlapping occurrence of [needle] in [haystack]
+/// with [replacement].  Both byte sequences may have different lengths
+/// (caller is responsible for length validation when needed).
+Uint8List _replaceAll(
+    Uint8List haystack, Uint8List needle, Uint8List replacement) {
+  if (needle.isEmpty || haystack.length < needle.length) return haystack;
+  // Same-length fast path: in-place mutation on a copy.
+  if (needle.length == replacement.length) {
+    final out = Uint8List.fromList(haystack);
+    final last = out.length - needle.length;
+    outer:
+    for (var i = 0; i <= last; i++) {
+      for (var j = 0; j < needle.length; j++) {
+        if (out[i + j] != needle[j]) continue outer;
+      }
+      out.setRange(i, i + replacement.length, replacement);
+      i += needle.length - 1;
+    }
+    return out;
+  }
+  // Length-changing path: rebuild via BytesBuilder.
+  final builder = BytesBuilder(copy: false);
+  var i = 0;
+  while (i < haystack.length) {
+    if (i + needle.length <= haystack.length) {
+      var match = true;
+      for (var j = 0; j < needle.length; j++) {
+        if (haystack[i + j] != needle[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        builder.add(replacement);
+        i += needle.length;
+        continue;
+      }
+    }
+    builder.addByte(haystack[i]);
+    i++;
+  }
+  return Uint8List.fromList(builder.toBytes());
+}
+
+bool _byteListEqual(Uint8List a, Uint8List b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

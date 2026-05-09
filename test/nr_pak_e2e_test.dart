@@ -460,14 +460,26 @@ void main() {
         expect(hasHor, isFalse,
             reason: 'cloned uasset still carries source T_Bkg_Hor reference');
 
-        // v1.8.2.1 co-inject is OOR for Romance (baseNew=0) — the legacy
-        // 2-digit slot must NOT be produced.  Change 2 (v1.8.2.2 OOR
-        // clone path) will fill this case via length-preserving clone of
-        // T_New_Hor_01, but slice 2a doesn't ship that yet.
+        // v1.8.2.2 OOR clone (Change 2): Romance has baseNew=0 so the
+        // 2-digit slot is OOR.  The injector synthesizes it by length-
+        // preserving clone of T_New_Hor_01 via patchLegacy2DigitUasset.
+        // The result must reference T_Bkg_Rom (target), not T_Bkg_Hor.
         final legacyUa = File(p.join(base, 'T_New_Rom_01.uasset'));
-        expect(legacyUa.existsSync(), isFalse,
-            reason: 'OOR legacy slot leaked — should be deferred to '
-                'Change 2 OOR clone path');
+        final legacyUe = File(p.join(base, 'T_New_Rom_01.uexp'));
+        final legacyUb = File(p.join(base, 'T_New_Rom_01.ubulk'));
+        expect(legacyUa.existsSync(), isTrue,
+            reason: 'OOR co-inject did not run for Romance');
+        expect(legacyUe.existsSync(), isTrue);
+        expect(legacyUb.existsSync(), isTrue);
+        // Length-preserving rename: the patched uasset references the
+        // target genre / slot strings, not the donor's.
+        final legacyUaBytes = await legacyUa.readAsBytes();
+        expect(_bytesContainAscii(legacyUaBytes, 'T_New_Rom_01'), isTrue);
+        expect(_bytesContainAscii(legacyUaBytes, 'T_Bkg_Rom'), isTrue);
+        expect(_bytesContainAscii(legacyUaBytes, 'T_New_Hor_01'), isFalse,
+            reason: 'donor short name leaked into OOR clone');
+        expect(_bytesContainAscii(legacyUaBytes, 'T_Bkg_Hor'), isFalse,
+            reason: 'donor folder leaked into OOR clone');
       } finally {
         try {
           await tempDir.delete(recursive: true);

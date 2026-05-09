@@ -93,16 +93,19 @@ class TextureInjectorImpl implements TextureInjector {
 
     // 3. Read base uasset and base uexp.
     //
-    // Three flavours of resolution:
+    // Four flavours of resolution:
     //   * 3-digit NR (`T_New_<code>_<NN:03d>`, v1.8.2+): always clone from
-    //     `T_New_Hor_01` — base game ships only 2-digit T_New slots, so
-    //     the target name doesn't exist in any genre's folder.  Mirrors
-    //     Python's `prepare_nr_donor_in_cache` + `_t_new_donor_for`
-    //     (RR_VHS_Tool.py:2286-2384) which always picks Hor_01 as donor.
-    //   * 2-digit NR / Bkg: legacy resolver path — direct extract or
-    //     within-genre clone-from-preceding (RR_VHS_Tool.py:5670-5740).
-    //   * Custom 3-digit T_Bkg: same legacy resolver — walks back through
-    //     the genre's 2-digit base slots and clones via [cloneTexture3digit].
+    //     `T_New_Hor_01` via [cloneTexture3digit] — base game ships only
+    //     2-digit T_New slots, so the target name doesn't exist in any
+    //     genre's folder.  Mirrors Python's `prepare_nr_donor_in_cache`
+    //     + `_t_new_donor_for` (RR_VHS_Tool.py:2286-2384).
+    //   * 2-digit NR, in-range (`tex_num <= base_new`): direct extract
+    //     from the genre folder — legacy co-inject (Change 1, v1.8.2.1).
+    //   * 2-digit NR, out-of-range (`tex_num > base_new`): clone from
+    //     `T_New_Hor_01` via [patchLegacy2DigitUasset] (length-preserving
+    //     rename, Change 2 / v1.8.2.2 — RR_VHS_Tool.py:2484-2561).
+    //   * Custom 3-digit T_Bkg: legacy resolver — walks back through the
+    //     genre's 2-digit base slots and clones via [cloneTexture3digit].
     final dstSlotNum = _slotNumberFromName(textureName);
     if (dstSlotNum == null) {
       throw FormatException(
@@ -110,6 +113,7 @@ class TextureInjectorImpl implements TextureInjector {
     }
     final isThreeDigitNr =
         isNewRelease && _isThreeDigitTextureName(textureName);
+    final isTwoDigitNr = isNewRelease && !isThreeDigitNr;
 
     final Uint8List baseUasset;
     final Uint8List baseUexp;
@@ -126,6 +130,27 @@ class TextureInjectorImpl implements TextureInjector {
       // verbatim copy from the Hor donor is correct (Python uses
       // `shutil.copy2` for the same reason at RR_VHS_Tool.py:2371).
       baseUexp = donor.uexp;
+    } else if (isTwoDigitNr) {
+      // Try direct extract from the target genre's folder first (in-range
+      // case — base game has the file).  If it's missing, the slot is
+      // out-of-range relative to the genre's `base_new_count`; synthesize
+      // it via length-preserving clone of T_New_Hor_01.
+      final directUa = File(p.join(baseDir, '$textureName.uasset'));
+      final directUe = File(p.join(baseDir, '$textureName.uexp'));
+      if (await directUa.exists() && await directUe.exists()) {
+        baseUasset = await directUa.readAsBytes();
+        baseUexp = await directUe.readAsBytes();
+      } else {
+        final donor = await _readNrHorDonor(config);
+        baseUasset = patchLegacy2DigitUasset(
+          srcData: donor.uasset,
+          srcCode: 'Hor',
+          srcNum: 1,
+          dstCode: genreCode,
+          dstNum: dstSlotNum,
+        );
+        baseUexp = donor.uexp;
+      }
     } else {
       baseUasset = await _resolveUasset(
           baseDir: baseDir,

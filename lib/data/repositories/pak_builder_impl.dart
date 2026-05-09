@@ -595,10 +595,14 @@ class PakBuilderImpl implements PakBuilder {
   /// the 3-digit primary that [_writeNrTextures] just produced.  Pure port
   /// of Python's NR-Legacy loop (RR_VHS_Tool.py:14668-14712).
   ///
-  /// Out-of-range (OOR) cases — when the user pushed `tex_num` past the
-  /// base count via JSON edits in v1.8.1 — are skipped here with a log
-  /// line.  v1.8.2.2's clone path (Change 2) will fill those by
-  /// synthesizing the missing 2-digit asset from `T_New_Hor_01`.
+  /// Both in-range and out-of-range cases are handled (Change 1 +
+  /// Change 2):
+  ///   * `tex_num <= base_new`: direct extract from the genre folder
+  ///     (the donor file ships in the base pak).
+  ///   * `tex_num > base_new`: length-preserving clone of `T_New_Hor_01`
+  ///     via [patchLegacy2DigitUasset] inside the injector — synthesizes
+  ///     the missing 2-digit asset (Python's
+  ///     `prepare_nr_legacy_2digit_clone_in_cache`, RR_VHS_Tool.py:2484).
   ///
   /// Per-slot failures are non-fatal: log + continue.  An NR with a
   /// missing 2-digit slot only affects pre-v1.8.2 saves; new saves use
@@ -609,27 +613,17 @@ class PakBuilderImpl implements PakBuilder {
       List<NewReleaseSlot> nrSlots,
       Map<String, TextureReplacement> replacements) async {
     final eligible = <NewReleaseSlot>[];
-    var oorSkipped = 0;
     for (final s in nrSlots) {
       if (!kNrGenreByte.containsKey(s.genre)) continue;
       if (!replacements.containsKey(s.bkgTex)) continue;
-      final baseNew = kBaseNewSlotCount[s.genre] ?? 0;
+      // Slots beyond the 2-digit format range (texNum > 99) would widen
+      // the BackgroundImage FString and break the row layout — skip.
+      // Per-genre cap is 99 in [kNrPerGenreCap] so this is defensive.
       if (s.texNum < 1 || s.texNum > 99) continue;
-      if (s.texNum > baseNew) {
-        // OOR — defer to Change 2 (v1.8.2.2 clone path).
-        _log('  SKIP   NR-Legacy ${s.bkgTex}: tex_num ${s.texNum} '
-            '> base_new $baseNew (OOR, deferred to clone path)');
-        oorSkipped++;
-        continue;
-      }
       eligible.add(s);
     }
     if (eligible.isEmpty) {
-      if (oorSkipped == 0) {
-        _log('No NR slots eligible for legacy 2-digit co-inject');
-      } else {
-        _log('NR legacy 2-digit: 0 in-range, $oorSkipped OOR skipped');
-      }
+      _log('No NR slots eligible for legacy 2-digit co-inject');
       return;
     }
     _log('Co-injecting ${eligible.length} legacy 2-digit NR slot(s) '
@@ -647,14 +641,20 @@ class PakBuilderImpl implements PakBuilder {
 
     Future<_InjectOutcome> runOne(_LegacyCoInjectTask t) async {
       try {
-        // Pull donor 2-digit asset trio into the cache.  In-range only —
-        // OOR was filtered above.
-        final prep = await _pakCache
-            .prepareNrLegacy2digit(config, t.slot.genreCode, t.slot.texNum);
-        if (!prep.ok) {
-          _log('  FAIL   NR-Legacy ${t.legacyName}: '
-              'donor extract failed: ${prep.warning}');
-          return _InjectOutcome.failed;
+        // For in-range tex_nums, warm the per-genre cache by extracting
+        // the donor 2-digit trio (`T_New_<code>_<NN>.{uasset,uexp,ubulk}`)
+        // — the injector's 2-digit branch then direct-extracts these
+        // files.  For OOR, this call returns a skipped result; the
+        // injector falls through to its own Hor-donor clone path.
+        final baseNew = kBaseNewSlotCount[t.slot.genre] ?? 0;
+        if (t.slot.texNum <= baseNew) {
+          final prep = await _pakCache.prepareNrLegacy2digit(
+              config, t.slot.genreCode, t.slot.texNum);
+          if (!prep.ok) {
+            _log('  FAIL   NR-Legacy ${t.legacyName}: '
+                'donor extract failed: ${prep.warning}');
+            return _InjectOutcome.failed;
+          }
         }
         await _injector.inject(
           config: config,
@@ -663,7 +663,8 @@ class PakBuilderImpl implements PakBuilder {
           genreCode: t.slot.genreCode,
           replacement: t.replacement,
         );
-        _log('  CO-INJ NR-Legacy ${t.legacyName}');
+        _log('  CO-INJ NR-Legacy ${t.legacyName}'
+            '${t.slot.texNum > baseNew ? " (OOR clone)" : ""}');
         _step('Co-injected legacy ${t.legacyName}');
         return _InjectOutcome.injected;
       } catch (e) {
@@ -680,8 +681,7 @@ class PakBuilderImpl implements PakBuilder {
       if (o == _InjectOutcome.injected) injected++;
       if (o == _InjectOutcome.failed) failed++;
     }
-    _log('NR legacy 2-digit: $injected co-injected, $failed failed, '
-        '$oorSkipped OOR skipped');
+    _log('NR legacy 2-digit: $injected co-injected, $failed failed');
   }
 
   Future<void> _writeTextures(
