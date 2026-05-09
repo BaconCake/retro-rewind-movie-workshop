@@ -91,28 +91,57 @@ class TextureInjectorImpl implements TextureInjector {
       isNewRelease: isNewRelease,
     );
 
-    // 3. Read base uasset (or clone from a preceding base slot for custom
-    //    3-digit names) and base uexp (or fall back to the empty template).
-    //    Mirrors RR_VHS_Tool.py:5670-5740.
+    // 3. Read base uasset and base uexp.
+    //
+    // Three flavours of resolution:
+    //   * 3-digit NR (`T_New_<code>_<NN:03d>`, v1.8.2+): always clone from
+    //     `T_New_Hor_01` — base game ships only 2-digit T_New slots, so
+    //     the target name doesn't exist in any genre's folder.  Mirrors
+    //     Python's `prepare_nr_donor_in_cache` + `_t_new_donor_for`
+    //     (RR_VHS_Tool.py:2286-2384) which always picks Hor_01 as donor.
+    //   * 2-digit NR / Bkg: legacy resolver path — direct extract or
+    //     within-genre clone-from-preceding (RR_VHS_Tool.py:5670-5740).
+    //   * Custom 3-digit T_Bkg: same legacy resolver — walks back through
+    //     the genre's 2-digit base slots and clones via [cloneTexture3digit].
     final dstSlotNum = _slotNumberFromName(textureName);
     if (dstSlotNum == null) {
       throw FormatException(
           'Could not parse slot number from $textureName');
     }
-    final baseUasset = await _resolveUasset(
-        baseDir: baseDir,
-        horBaseDir: horBaseDir,
-        textureName: textureName,
-        genreCode: genreCode,
-        dstSlotNum: dstSlotNum,
-        isNewRelease: isNewRelease);
+    final isThreeDigitNr =
+        isNewRelease && _isThreeDigitTextureName(textureName);
 
-    final baseUexp = await _resolveUexp(
-        baseDir: baseDir,
-        horBaseDir: horBaseDir,
-        textureName: textureName,
-        dstSlotNum: dstSlotNum,
-        isNewRelease: isNewRelease);
+    final Uint8List baseUasset;
+    final Uint8List baseUexp;
+    if (isThreeDigitNr) {
+      final donor = await _readNrHorDonor(config);
+      baseUasset = cloneTexture3digit(
+        srcData: donor.uasset,
+        srcCode: 'Hor',
+        srcNum: 1,
+        dstCode: genreCode,
+        dstNum: dstSlotNum,
+      );
+      // uexp + ubulk are pixel-data containers — name-independent, so
+      // verbatim copy from the Hor donor is correct (Python uses
+      // `shutil.copy2` for the same reason at RR_VHS_Tool.py:2371).
+      baseUexp = donor.uexp;
+    } else {
+      baseUasset = await _resolveUasset(
+          baseDir: baseDir,
+          horBaseDir: horBaseDir,
+          textureName: textureName,
+          genreCode: genreCode,
+          dstSlotNum: dstSlotNum,
+          isNewRelease: isNewRelease);
+
+      baseUexp = await _resolveUexp(
+          baseDir: baseDir,
+          horBaseDir: horBaseDir,
+          textureName: textureName,
+          dstSlotNum: dstSlotNum,
+          isNewRelease: isNewRelease);
+    }
 
     final artifacts = composeArtifacts(
       ddsBytes: ddsBytes,
@@ -470,6 +499,9 @@ class TextureInjectorImpl implements TextureInjector {
   /// For T_New on a genre with `newCount==0`, extract Horror's `T_Bkg_Hor`
   /// folder so the caller can clone `T_New_Hor_01.*` cross-genre.  Returns
   /// the extracted folder path, or null when not applicable.
+  ///
+  /// Only used by the legacy 2-digit resolver path now — 3-digit NRs go
+  /// through [_readNrHorDonor] regardless of target genre's newCount.
   Future<String?> _maybeExtractHorForCrossGenre(
       AppConfig config, bool isNewRelease, String genreCode) async {
     if (!isNewRelease) return null;
@@ -484,6 +516,29 @@ class TextureInjectorImpl implements TextureInjector {
           'Could not extract T_Bkg_Hor for cross-genre clone: ${res.warning}');
     }
     return res.path!;
+  }
+
+  /// Pull the canonical NR donor pair (`T_New_Hor_01.uasset/.uexp`) out of
+  /// the base pak via [PakCache].  Both files always exist (Horror has
+  /// `newCount = 4`).  Pure port of the donor side of
+  /// `prepare_nr_donor_in_cache` (RR_VHS_Tool.py:2311-2384) — minus the
+  /// on-disk pre-materialisation of the cloned target file (we clone +
+  /// write straight into the build's workRoot from the inject() caller).
+  Future<({Uint8List uasset, Uint8List uexp})> _readNrHorDonor(
+      AppConfig config) async {
+    const donorBase =
+        '$_kBackgroundPakPrefix/T_Bkg_Hor/T_New_Hor_01';
+    final uaRes = await pakCache.extractFile(config, '$donorBase.uasset');
+    final ueRes = await pakCache.extractFile(config, '$donorBase.uexp');
+    if (!uaRes.ok || !ueRes.ok) {
+      throw StateError(
+        'Could not extract T_New_Hor_01 donor: '
+        'uasset=${uaRes.warning}, uexp=${ueRes.warning}',
+      );
+    }
+    final uasset = await File(uaRes.path!).readAsBytes();
+    final uexp = await File(ueRes.path!).readAsBytes();
+    return (uasset: uasset, uexp: uexp);
   }
 }
 
@@ -567,6 +622,17 @@ String _fnv1a64Hex(String s) {
 String _textureNameStem(String name) {
   final idx = name.lastIndexOf('_');
   return idx <= 0 ? name : name.substring(0, idx);
+}
+
+/// True when [name] ends with a 3-digit slot number (`T_New_Dra_001`,
+/// `T_Bkg_Hor_017`, etc.).  Used by the inject path to route NR slots
+/// through the Hor donor clone (v1.8.2 — RR_VHS_Tool.py:2330).  Returns
+/// false for 2-digit names (legacy co-inject) and for malformed inputs.
+bool _isThreeDigitTextureName(String name) {
+  final idx = name.lastIndexOf('_');
+  if (idx <= 0 || idx >= name.length - 1) return false;
+  final tail = name.substring(idx + 1);
+  return tail.length == 3 && int.tryParse(tail) != null;
 }
 
 /// Parse the trailing slot number out of `T_Bkg_<code>_<num>`.  Returns
