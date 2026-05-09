@@ -34,7 +34,8 @@ NewReleaseSlot _slot({
     genre: genre,
     genreCode: code,
     genreByte: kNrGenreByte[genre] ?? 0,
-    bkgTex: 'T_New_${code}_${texNum.toString().padLeft(2, '0')}',
+    // 3-digit naming since v1.8.2 (slice 2a.3): T_New_<code>_<NN:03d>.
+    bkgTex: 'T_New_${code}_${texNum.toString().padLeft(3, '0')}',
     sku: sku,
     standeeShape: shape,
     texNum: texNum,
@@ -86,10 +87,8 @@ void main() {
       final tail = r.uexpBytes.sublist(r.uexpBytes.length - 8);
       expect(tail, [0x00, 0x00, 0x00, 0x00, 0xC1, 0x83, 0x2A, 0x9E]);
 
-      // uexp size = headerLen + nRows*54 + 8 (footer)
-      // Re-derive headerLen via a new ROW_START scan on the output and
-      // confirm the math holds.
-      final hdrLen = r.uexpBytes.length - 1 * 54 - 8;
+      // uexp size = headerLen + nRows*55 + 8 (footer) under v1.8.2 layout.
+      final hdrLen = r.uexpBytes.length - 1 * 55 - 8;
       expect(hdrLen, greaterThan(0));
 
       // Re-parse the rebuilt uasset (NR-named) so we can verify the title
@@ -119,9 +118,9 @@ void main() {
       expect(r, isNotNull);
       expect(r!.rowCount, 3);
 
-      // Walk rows: each row's NextRowKey (offset 50, uint32) should be the
-      // FName index of the next row's row key string ("2", "3"), with the
-      // last row terminating at 0.
+      // Walk rows: each row's NextRowKey (offset 51 in v1.8.2 layout,
+      // uint32) should be the FName index of the next row's row key
+      // string ("2", "3"), with the last row terminating at 0.
       final reparse = DataTableParser.parsePair(
         uassetBytes: r.uassetBytes,
         uexpBytes: r.uexpBytes,
@@ -130,11 +129,11 @@ void main() {
       final names = reparse.uasset.nameTable.entries.map((e) => e.value).toList();
       int idxOf(String s) => names.indexOf(s);
 
-      final hdrLen = r.uexpBytes.length - 3 * 54 - 8;
+      final hdrLen = r.uexpBytes.length - 3 * 55 - 8;
       final view = ByteData.sublistView(r.uexpBytes);
-      final next1 = view.getUint32(hdrLen + 0 * 54 + 50, Endian.little);
-      final next2 = view.getUint32(hdrLen + 1 * 54 + 50, Endian.little);
-      final next3 = view.getUint32(hdrLen + 2 * 54 + 50, Endian.little);
+      final next1 = view.getUint32(hdrLen + 0 * 55 + 51, Endian.little);
+      final next2 = view.getUint32(hdrLen + 1 * 55 + 51, Endian.little);
+      final next3 = view.getUint32(hdrLen + 2 * 55 + 51, Endian.little);
 
       expect(next1, idxOf('2'));
       expect(next2, idxOf('3'));
@@ -152,7 +151,7 @@ void main() {
       ]);
       expect(r, isNotNull);
 
-      final hdrLen = r!.uexpBytes.length - 1 * 54 - 8;
+      final hdrLen = r!.uexpBytes.length - 1 * 55 - 8;
       final view = ByteData.sublistView(r.uexpBytes);
 
       // RK_NUM at row+4
@@ -163,25 +162,25 @@ void main() {
       expect(r.uexpBytes[hdrLen + 20], 0x2D);
       expect(r.uexpBytes[hdrLen + 21], 0x31);
       expect(r.uexpBytes[hdrLen + 22], 0x00);
-      // BackgroundImage FString len = 13
-      expect(view.getInt32(hdrLen + 23, Endian.little), 13);
-      // bkg_tex bytes 27..38, then null at 39
+      // BackgroundImage FString len = 14 (3-digit, v1.8.2)
+      expect(view.getInt32(hdrLen + 23, Endian.little), 14);
+      // bkg_tex bytes 27..40, then null at 40
       expect(
-        String.fromCharCodes(r.uexpBytes.sublist(hdrLen + 27, hdrLen + 39)),
-        'T_New_Hor_01',
+        String.fromCharCodes(r.uexpBytes.sublist(hdrLen + 27, hdrLen + 40)),
+        'T_New_Hor_001',
       );
-      expect(r.uexpBytes[hdrLen + 39], 0x00);
-      // Genre byte = Horror = 0x05
-      expect(r.uexpBytes[hdrLen + 40], 0x05);
-      // LayoutStyle int32 = -1
-      expect(view.getInt32(hdrLen + 41, Endian.little), -1);
-      // SKU uint16 = 51234
-      expect(view.getUint16(hdrLen + 45, Endian.little), 51234);
-      // NewToUnlock = 1
-      expect(r.uexpBytes[hdrLen + 49], 0x01);
+      expect(r.uexpBytes[hdrLen + 40], 0x00);
+      // Genre byte = Horror = 0x05 (now at 41 — was 40)
+      expect(r.uexpBytes[hdrLen + 41], 0x05);
+      // LayoutStyle int32 = -1 (now at 42 — was 41)
+      expect(view.getInt32(hdrLen + 42, Endian.little), -1);
+      // SKU uint16 = 51234 (now at 46 — was 45)
+      expect(view.getUint16(hdrLen + 46, Endian.little), 51234);
+      // NewToUnlock = 1 (now at 50 — was 49)
+      expect(r.uexpBytes[hdrLen + 50], 0x01);
     });
 
-    test('serial_size patched to rowStart + nRows*54 - 4', () async {
+    test('serial_size patched to rowStart + nRows*55 - 4', () async {
       if (!fixturesAvailable) {
         markTestSkipped('fixtures unavailable');
         return;
@@ -199,10 +198,10 @@ void main() {
         genreDataTableName: 'NewRelease_Details_-_Data',
       );
 
-      final hdrLen = r.uexpBytes.length - 2 * 54 - 8;
-      final expectedSerial = hdrLen + 2 * 54 - 4;
+      final hdrLen = r.uexpBytes.length - 2 * 55 - 8;
+      final expectedSerial = hdrLen + 2 * 55 - 4;
       expect(reparse.uasset.serialSize, expectedSerial,
-          reason: 'serial_size should be rowStart + nRows*54 - 4');
+          reason: 'serial_size should be rowStart + nRows*55 - 4');
     });
 
     test('build is deterministic (same input → same output)', () async {
@@ -232,7 +231,7 @@ void main() {
         genre: 'Adventure',
         genreCode: 'Adv',
         genreByte: 0x00,
-        bkgTex: 'T_New_Adv_01',
+        bkgTex: 'T_New_Adv_001',
         sku: 50001,
         standeeShape: 'A',
         texNum: 1,
@@ -254,7 +253,7 @@ void main() {
           genre: 'Adventure',
           genreCode: 'Adv',
           genreByte: 0x00,
-          bkgTex: 'T_New_Adv_01',
+          bkgTex: 'T_New_Adv_001',
           sku: 50001,
           standeeShape: 'A',
           texNum: 1,

@@ -12,20 +12,31 @@ import 'name_table_extender.dart';
 
 /// New Release DataTable: a single asset under [kDataTableRootPath] holding
 /// only custom rows (no base-game rows preserved).  Row layout differs from
-/// the genre DataTables (54 bytes vs 71/72/73), so this builder does not
+/// the genre DataTables (55 bytes vs 71/72/73), so this builder does not
 /// share `DataTableBuilder`'s row pipeline — only the [NameTableExtender]
 /// (which is format-agnostic) and the uasset half of `DataTableParser` are
 /// reused.  The uexp half of the parser is genre-specific (scans for
 /// `T_Sub_`, expects 71/72/73-byte rows) and would mis-detect on NR — its
 /// output is intentionally discarded; we re-detect ROW_START NR-style.
 ///
-/// Pure port of `build_newrelease_datatable` (RR_VHS_Tool.py:3663-3917).
+/// Pure port of `build_newrelease_datatable` (RR_VHS_Tool.py:4112-4383).
 const String _dtName = 'NewRelease_Details_-_Data';
 
-/// Each NR row is exactly 54 bytes — the BackgroundImage FString is fixed at
-/// 13 chars (`T_New_XXX_NN\0`), which is why the UI caps NR count per genre
-/// at 99 (3-digit names would widen the row).  See [kNrPerGenreCap].
-const int _rowSize = 54;
+/// Each NR row is exactly 55 bytes since the v1.8.2 3-digit migration —
+/// the BackgroundImage FString grew from 13 chars (`T_New_XXX_NN\0`) to
+/// 14 (`T_New_XXX_NNN\0`), shifting every field after it by +1.  Base
+/// game rows still use the old 54-byte (2-digit) layout, so we never
+/// copy them as a template — we build each row from scratch.
+const int _rowSize = 55;
+const int _biLen = 14; // BackgroundImage FString incl trailing NUL.
+
+// Field offsets within a 55-byte row — v1.8.2 layout (Python lines 4148-4155).
+const int _biOffset = 27;            // bkg_b start
+const int _genreOff = _biOffset + _biLen; // 41
+const int _layoutOff = _genreOff + 1;     // 42 (int32)
+const int _skuOff = _layoutOff + 4;       // 46 (uint16) + 2 pad
+const int _ntuOff = _skuOff + 4;          // 50 (uint8)  — after SKU + pad
+const int _nextKeyOff = _ntuOff + 1;      // 51 (uint32)
 
 /// RK_NUM constant present in every row at offset 4 (Python Z. 3675).
 /// Mirrors the per-row "RowKey number" Unreal stores alongside the FName.
@@ -120,14 +131,11 @@ class NewReleaseDataTableBuilder {
     }
     final rowCountOff = rowStart == 0x1A ? 0x12 : 0x0E;
 
-    // 4) Take the first base row as a template — this preserves any
-    // engine-internal padding bytes between explicit fields and matches
-    // Python's approach (Z. 3771).
-    if (rowStart + _rowSize > ueBytes.length) {
-      throw const NewReleaseBuildError(
-          'E015', 'base uexp too short to read template row');
-    }
-    final tmpl = ueBytes.sublist(rowStart, rowStart + _rowSize);
+    // 4) No template needed — the v1.8.2 (3-digit) row format is 55
+    //    bytes, but base game rows still use the 54-byte 2-digit layout.
+    //    Copying the base row would mis-align every field past the
+    //    bkg_tex string.  Build each row from scratch instead (Python:
+    //    `row = bytearray(ROW_SIZE)`, RR_VHS_Tool.py:4320).
 
     // 5) Extend the FName table with the row keys "1".."N" and the unique
     // movie titles.  indexOf is idempotent — adding a name that's already
@@ -150,7 +158,6 @@ class NewReleaseDataTableBuilder {
         slot: valid[i],
         rowIndex: i,
         isLast: i == valid.length - 1,
-        template: tmpl,
         rowKeyIdx: extender.indexOf((i + 1).toString()),
         productNameIdx: extender.indexOf(valid[i].title),
         nextRowKeyIdx: i == valid.length - 1
@@ -177,7 +184,7 @@ class NewReleaseDataTableBuilder {
         headerLen + rowBlock.length, newUexp.length, _plainFooter);
 
     // 8) Build new uasset and patch serial_size value.
-    //    serial_size = rowStart + n_rows*54 - 4 (Python Z. 3895-3905).
+    //    serial_size = rowStart + n_rows * _rowSize - 4 (Python Z. 4362).
     final newUasset = Uint8List.fromList(extender.buildUAssetBytes());
     final newSerialValue = rowStart + valid.length * _rowSize - 4;
     final newSerialOff = parsed.uasset.serialSizeOffset + extender.growthBytes;
@@ -197,7 +204,7 @@ class NewReleaseDataTableBuilder {
     );
   }
 
-  /// Synthesise one 54-byte NR row.  Layout from Python Z. 3673-3690:
+  /// Synthesise one 55-byte NR row.  Layout from Python Z. 4122-4137 (v1.8.2):
   /// ```
   /// [0:4]   RowKey FName idx
   /// [4:8]   RK_NUM (0x01A81780)
@@ -205,26 +212,26 @@ class NewReleaseDataTableBuilder {
   /// [12:16] ProductName FName num (0)
   /// [16:20] SubjectImage FString len (3)
   /// [20:23] "-1\0"
-  /// [23:27] BackgroundImage FString len (13)
-  /// [27:40] "T_New_XXX_NN\0"
-  /// [40]    Genre enum byte
-  /// [41:45] LayoutStyle int32 (-1)
-  /// [45:47] SKU uint16
-  /// [47]    0x00
-  /// [48]    0x00
-  /// [49]    NewToUnlock byte (0x01)
-  /// [50:54] NextRowKey idx (0 = end of linked list)
+  /// [23:27] BackgroundImage FString len (14)
+  /// [27:41] "T_New_XXX_NNN\0"  (3-digit slot number — v1.8.2 migration)
+  /// [41]    Genre enum byte
+  /// [42:46] LayoutStyle int32 (-1)
+  /// [46:48] SKU uint16
+  /// [48:50] padding (0x00 0x00)
+  /// [50]    NewToUnlock byte (0x01)
+  /// [51:55] NextRowKey idx (0 = end of linked list)
   /// ```
   static Uint8List _buildRow({
     required NewReleaseSlot slot,
     required int rowIndex,
     required bool isLast,
-    required Uint8List template,
     required int rowKeyIdx,
     required int productNameIdx,
     required int nextRowKeyIdx,
   }) {
-    final row = Uint8List.fromList(template);
+    // Zero-init: pad bytes [48..50) and the unused upper SKU bytes are
+    // already 0; we only set fields that carry data.
+    final row = Uint8List(_rowSize);
     final view = ByteData.sublistView(row);
 
     view.setUint32(0, rowKeyIdx, Endian.little);
@@ -238,19 +245,19 @@ class NewReleaseDataTableBuilder {
     row[21] = 0x31; // '1'
     row[22] = 0x00;
 
-    // BackgroundImage FString "T_New_XXX_NN\0"
+    // BackgroundImage FString "T_New_XXX_NNN\0" (13 chars + NUL = 14 bytes)
     final bkg = utf8.encode(slot.bkgTex);
-    if (bkg.length != 12) {
+    if (bkg.length != _biLen - 1) {
       throw NewReleaseBuildError('E004',
-          'bkg_tex must be exactly 12 chars, got "${slot.bkgTex}" '
-          '(${bkg.length} bytes)');
+          'bkg_tex must be exactly ${_biLen - 1} chars (3-digit format), '
+          'got "${slot.bkgTex}" (${bkg.length} bytes)');
     }
-    view.setInt32(23, 13, Endian.little);
-    row.setRange(27, 39, bkg);
-    row[39] = 0x00;
+    view.setInt32(23, _biLen, Endian.little);
+    row.setRange(_biOffset, _biOffset + bkg.length, bkg);
+    row[_biOffset + bkg.length] = 0x00;
 
-    row[40] = slot.genreByte;
-    view.setInt32(41, -1, Endian.little);
+    row[_genreOff] = slot.genreByte;
+    view.setInt32(_layoutOff, -1, Endian.little);
 
     // SKU uint16 — Python uses 5-digit values in 50000..59999 which fit
     // exactly in uint16 (max 65535).  A larger value would silently
@@ -259,12 +266,11 @@ class NewReleaseDataTableBuilder {
       throw NewReleaseBuildError(
           'E004', 'SKU ${slot.sku} does not fit in uint16');
     }
-    view.setUint16(45, slot.sku, Endian.little);
+    view.setUint16(_skuOff, slot.sku, Endian.little);
+    // Bytes [_skuOff+2, _skuOff+4) are pad — left at 0 from Uint8List init.
 
-    row[47] = 0x00;
-    row[48] = 0x00;
-    row[49] = 0x01; // NewToUnlock = true
-    view.setUint32(50, isLast ? 0 : nextRowKeyIdx, Endian.little);
+    row[_ntuOff] = 0x01; // NewToUnlock = true
+    view.setUint32(_nextKeyOff, isLast ? 0 : nextRowKeyIdx, Endian.little);
 
     return row;
   }

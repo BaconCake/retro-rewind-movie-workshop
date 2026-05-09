@@ -68,12 +68,15 @@ void main() {
     late bool fixturesAvailable;
 
     final slots = <NewReleaseSlot>[
+      // 3-digit bkgTex naming as of v1.8.2 (slice 2a.3): the NR DT builder
+      // rejects 12-char (2-digit) values now.  Slot numbering is still
+      // 1..99 — only the FName encoding switched to 3 digits.
       const NewReleaseSlot(
         title: 'E2E Drama',
         genre: 'Drama',
         genreCode: 'Dra',
         genreByte: 0x02,
-        bkgTex: 'T_New_Dra_01',
+        bkgTex: 'T_New_Dra_001',
         sku: 50000,
         standeeShape: 'A',
         texNum: 1,
@@ -83,7 +86,7 @@ void main() {
         genre: 'Horror',
         genreCode: 'Hor',
         genreByte: 0x05,
-        bkgTex: 'T_New_Hor_02',
+        bkgTex: 'T_New_Hor_002',
         sku: 51000,
         standeeShape: 'B',
         texNum: 2,
@@ -93,7 +96,7 @@ void main() {
         genre: 'Sci-Fi',
         genreCode: 'Sci',
         genreByte: 0x07,
-        bkgTex: 'T_New_Sci_03',
+        bkgTex: 'T_New_Sci_003',
         sku: 52000,
         standeeShape: 'C',
         texNum: 3,
@@ -359,7 +362,7 @@ void main() {
         genre: 'Drama',
         genreCode: 'Dra',
         genreByte: 0x02,
-        bkgTex: 'T_New_Dra_01',
+        bkgTex: 'T_New_Dra_001',
         sku: 50500,
         standeeShape: 'A',
         texNum: 1,
@@ -408,7 +411,7 @@ void main() {
         genre: 'Romance',
         genreCode: 'Rom',
         genreByte: 0x09,
-        bkgTex: 'T_New_Rom_01',
+        bkgTex: 'T_New_Rom_001',
         sku: 50600,
         standeeShape: 'A',
         texNum: 1,
