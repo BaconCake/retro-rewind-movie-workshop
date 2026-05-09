@@ -7,6 +7,8 @@
 /// canonical order the Python tool uses.
 library;
 
+import 'package:flutter/material.dart' show Color;
+
 class GenreInfo {
   final String name;
   final String code;
@@ -26,6 +28,32 @@ class GenreInfo {
     required this.dataTableName,
   });
 }
+
+/// Genre badge colours for shelf accents and NR row badges.  Pure port of
+/// `GENRE_COLORS` (RR_VHS_Tool.py:2006-2019).  The shelf falls back to
+/// neutral border / dim text for genres not in this map (e.g. Adventure,
+/// which has neither a UI tab in the Python tool nor an NR-eligible entry
+/// in [kNrGenreByte]).
+class GenreColor {
+  final Color bg;
+  final Color fg;
+  const GenreColor({required this.bg, required this.fg});
+}
+
+const Map<String, GenreColor> kGenreColors = {
+  'Action':  GenreColor(bg: Color(0xFF9ACEFF), fg: Color(0xFF1A1A2E)),
+  'Adult':   GenreColor(bg: Color(0xFF3D0559), fg: Color(0xFFE8E8E8)),
+  'Comedy':  GenreColor(bg: Color(0xFFFFCE00), fg: Color(0xFF1A1A2E)),
+  'Drama':   GenreColor(bg: Color(0xFFA8BAFF), fg: Color(0xFF1A1A2E)),
+  'Fantasy': GenreColor(bg: Color(0xFF4B590E), fg: Color(0xFFE8E8E8)),
+  'Horror':  GenreColor(bg: Color(0xFFE50000), fg: Color(0xFFFFFFFF)),
+  'Kids':    GenreColor(bg: Color(0xFFA081FF), fg: Color(0xFF1A1A2E)),
+  'Police':  GenreColor(bg: Color(0xFFFFFFFF), fg: Color(0xFF1A1A2E)),
+  'Romance': GenreColor(bg: Color(0xFFEF74FF), fg: Color(0xFF1A1A2E)),
+  'Sci-Fi':  GenreColor(bg: Color(0xFF78FFD9), fg: Color(0xFF1A1A2E)),
+  'Western': GenreColor(bg: Color(0xFFFFB53F), fg: Color(0xFF1A1A2E)),
+  'Xmas':    GenreColor(bg: Color(0xFFBEFF00), fg: Color(0xFF1A1A2E)),
+};
 
 const List<GenreInfo> kGenres = [
   GenreInfo(name: 'Action',    code: 'Act', bkgCount: 15, newCount: 3, dataTableName: 'Action'),

@@ -954,13 +954,6 @@ class _NrSlotForm extends ConsumerWidget {
         .updateSlot(slot.copyWith(title: v));
   }
 
-  Future<void> _setStandee(WidgetRef ref, String shape) async {
-    if (shape == slot.standeeShape) return;
-    await ref
-        .read(nrSlotsControllerProvider)
-        .updateSlot(slot.copyWith(standeeShape: shape));
-  }
-
   Future<void> _setGenre(BuildContext context, WidgetRef ref,
       String newGenre) async {
     if (newGenre == slot.genre) return;
@@ -993,19 +986,16 @@ class _NrSlotForm extends ConsumerWidget {
           onCommit: (v) => _commitTitle(ref, v),
         ),
         _OptionRow(label: 'Texture', value: slot.bkgTex),
+        const SizedBox(height: kSp3),
+        const _SubHeader('STANDEE SHAPE'),
         const SizedBox(height: kSp2),
+        _NrShapeCardRow(slot: slot),
+        const SizedBox(height: kSp3),
         const _SubHeader('GENRE'),
         const SizedBox(height: kSp1),
         _NrGenreGrid(
           current: slot.genre,
           onPick: (g) => _setGenre(context, ref, g),
-        ),
-        const SizedBox(height: kSp3),
-        const _SubHeader('STANDEE SHAPE'),
-        const SizedBox(height: kSp1),
-        _NrStandeePicker(
-          current: slot.standeeShape,
-          onPick: (s) => _setStandee(ref, s),
         ),
         const SizedBox(height: kSp3),
         const _SubHeader('CATALOG ID'),
@@ -1051,6 +1041,104 @@ class _NrSlotForm extends ConsumerWidget {
 }
 
 /// Button grid of NR-eligible genres.  Selected genre is filled cyan;
+/// 3-card NR standee shape picker — A/B/C with the bundled standee
+/// game-screenshot JPGs (`assets/standee_templates/standee_<shape>.jpg`).
+/// Mirrors the right-column shape picker in Python's NR form
+/// (RR_VHS_Tool.py:8735-8776).  Click sets the slot's [standeeShape]
+/// AND auto-switches the centre preview to Standee mode (Python's
+/// `_on_shape_pick`, RR_VHS_Tool.py:9306-9307).
+class _NrShapeCardRow extends ConsumerWidget {
+  final NewReleaseSlot slot;
+  const _NrShapeCardRow({required this.slot});
+
+  Future<void> _pick(WidgetRef ref, String shape) async {
+    if (shape != slot.standeeShape) {
+      await ref
+          .read(nrSlotsControllerProvider)
+          .updateSlot(slot.copyWith(standeeShape: shape));
+    }
+    ref.read(standeePreviewModeProvider.notifier).state = true;
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Row(
+      children: [
+        for (final s in const ['A', 'B', 'C']) ...[
+          Expanded(
+            child: _NrShapeCard(
+              shape: s,
+              selected: s == slot.standeeShape,
+              onTap: () => _pick(ref, s),
+            ),
+          ),
+          if (s != 'C') const SizedBox(width: kSp2),
+        ],
+      ],
+    );
+  }
+}
+
+class _NrShapeCard extends StatelessWidget {
+  final String shape;
+  final bool selected;
+  final VoidCallback onTap;
+  const _NrShapeCard({
+    required this.shape,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final asset =
+        'assets/standee_templates/standee_${shape.toLowerCase()}.jpg';
+    final borderColor = selected ? kColorCyan : kColorBorder;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        decoration: BoxDecoration(
+          color: kColorPanel,
+          border: Border.all(color: borderColor, width: selected ? 2 : 1),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          children: [
+            AspectRatio(
+              aspectRatio: 1,
+              child: Image.asset(
+                asset,
+                fit: BoxFit.contain,
+                errorBuilder: (_, _, _) => Container(
+                  color: kColorBg,
+                  alignment: Alignment.center,
+                  child: const Icon(Icons.image_not_supported,
+                      color: kColorText3, size: 28),
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: kSp1),
+              alignment: Alignment.center,
+              color: selected ? kColorCyan : kColorPanel,
+              child: Text(
+                shape,
+                style: TextStyle(
+                  fontFamily: kFontFamily,
+                  fontSize: kFsApp,
+                  fontWeight: FontWeight.w700,
+                  color: selected ? kColorTextInv : kColorText2,
+                  letterSpacing: 2,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// others use the panel surface.  Mirrors Python's
 /// `_update_nr_genre_btns` (RR_VHS_Tool.py:9215-9222).
 class _NrGenreGrid extends StatelessWidget {
@@ -1076,43 +1164,15 @@ class _NrGenreGrid extends StatelessWidget {
   }
 }
 
-/// A/B/C standee-shape picker.  Square buttons, single-letter labels.
-/// Mirrors Python's `_set_standee` segmented buttons (RR_VHS_Tool.py:9296).
-class _NrStandeePicker extends StatelessWidget {
-  final String current;
-  final ValueChanged<String> onPick;
-
-  const _NrStandeePicker({required this.current, required this.onPick});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        for (final s in kNrStandeeShapes) ...[
-          _NrPickerButton(
-            label: s,
-            selected: s == current,
-            onTap: () => onPick(s),
-            minWidth: 44,
-          ),
-          if (s != kNrStandeeShapes.last) const SizedBox(width: kSp1),
-        ],
-      ],
-    );
-  }
-}
-
 class _NrPickerButton extends StatelessWidget {
   final String label;
   final bool selected;
   final VoidCallback onTap;
-  final double minWidth;
 
   const _NrPickerButton({
     required this.label,
     required this.selected,
     required this.onTap,
-    this.minWidth = 0,
   });
 
   @override
@@ -1120,7 +1180,6 @@ class _NrPickerButton extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Container(
-        constraints: BoxConstraints(minWidth: minWidth),
         padding: const EdgeInsets.symmetric(
             horizontal: kSp2, vertical: kSp1),
         decoration: BoxDecoration(

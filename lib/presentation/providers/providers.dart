@@ -133,17 +133,26 @@ class ReplacementsController {
   final Ref _ref;
   ReplacementsController(this._ref);
 
+  /// Set or replace the user image for [bkgTex].  Always resets the
+  /// crop transform to defaults (offset 0/0, zoom 1.0) — picking a new
+  /// image starts a fresh full-cover layout, the previous image's
+  /// zoom/position is intentionally not carried over.
+  ///
+  /// Divergence from Python: `_upload` (RR_VHS_Tool.py:12651-12656)
+  /// preserves the prior offset/zoom on replace.  We don't — a new image
+  /// almost never has the same composition as the one it replaced, so
+  /// inheriting the old crop tends to leave subjects half-cropped.  Per
+  /// user feedback 2026-05-09.
   Future<void> setImage(String bkgTex, String imagePath) async {
     final dir = _ref.read(workingDirProvider);
     final ds = ReplacementsDataSource(dir);
     final current = await ds.load();
     final next = Map<String, TextureReplacement>.from(current);
-    final existing = next[bkgTex];
     next[bkgTex] = TextureReplacement(
       path: imagePath,
-      offsetX: existing?.offsetX ?? 0,
-      offsetY: existing?.offsetY ?? 0,
-      zoom: existing?.zoom ?? 1.0,
+      offsetX: 0,
+      offsetY: 0,
+      zoom: 1.0,
     );
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
@@ -447,6 +456,11 @@ final selectedTabProvider = StateProvider<String>((_) => 'All Movies');
 ///
 /// Null when no slot is picked.  Cleared on tab switch.
 final selectedSlotBkgProvider = StateProvider<String?>((_) => null);
+
+/// VHS vs Standee preview mode for the selected NR slot.
+/// `false` = VHS cover view (default), `true` = standee shape JPG.
+/// Genre slots ignore this (they only have the VHS view).
+final standeePreviewModeProvider = StateProvider<bool>((_) => false);
 
 /// Selection-key prefix for NR slots in [selectedSlotBkgProvider].
 const String kNrSelectionPrefix = 'nr:';

@@ -3,10 +3,12 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../data/services/cover_actions.dart';
+import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
 import 'crop_editor_bar.dart';
@@ -28,6 +30,16 @@ class SlotPreview extends ConsumerWidget {
 
     if (selectedBkg == null) {
       return const _EmptyState();
+    }
+
+    // NR slots are routed to a dedicated preview that supports the
+    // VHS/Standee toggle and forces full-canvas crop semantics — NRs
+    // don't use the layout-aware cropping that genre slots do.
+    if (selectedBkg.startsWith(kNrSelectionPrefix)) {
+      final sku =
+          int.tryParse(selectedBkg.substring(kNrSelectionPrefix.length));
+      if (sku == null) return const _EmptyState();
+      return _NrSlotPreview(sku: sku);
     }
 
     final slots = ref.watch(customSlotsProvider).maybeWhen(
@@ -107,6 +119,242 @@ class SlotPreview extends ConsumerWidget {
   }
 }
 
+/// Preview pane for an NR slot.  Differs from the genre preview in three
+/// ways:
+///   * cropper runs in full-canvas mode and overlays the standee zone
+///     lines (gold/brown title-plate / footer / frame) instead of the
+///     layout-aware safe-area hatch;
+///   * VHS / Standee toggle above the cover swaps in the shape-specific
+///     overlay (semicircle arch for A, fold lines for B, rounded
+///     corners for C) on the same cropper canvas;
+///   * the layout-style picker below the cover is replaced by a 3-card
+///     standee-shape picker (A/B/C) — every NR ships as one of those
+///     three shapes, not as a layout 1..5.
+class _NrSlotPreview extends ConsumerWidget {
+  final int sku;
+  const _NrSlotPreview({required this.sku});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final nrAsync = ref.watch(nrSlotsProvider);
+    final replacements = ref.watch(replacementsProvider).maybeWhen(
+          data: (m) => m,
+          orElse: () => const {},
+        );
+
+    return nrAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => _PreviewPlaceholder(
+          label: 'NR LOAD ERROR', sublabel: '$e', isError: true),
+      data: (slots) {
+        NewReleaseSlot? slot;
+        for (final s in slots) {
+          if (s.sku == sku) {
+            slot = s;
+            break;
+          }
+        }
+        if (slot == null) return const _EmptyState();
+        final repl = replacements[slot.bkgTex];
+        final standeeMode = ref.watch(standeePreviewModeProvider);
+        final localSlot = slot;
+
+        return Padding(
+          padding: const EdgeInsets.all(kSp4),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _NrReplaceImageButton(bkgTex: localSlot.bkgTex),
+                  const SizedBox(width: kSp3),
+                  _VhsStandeeToggle(
+                    standeeMode: standeeMode,
+                    onChanged: (v) => ref
+                        .read(standeePreviewModeProvider.notifier)
+                        .state = v,
+                  ),
+                ],
+              ),
+              const SizedBox(height: kSp2),
+              Expanded(
+                child: repl == null
+                    ? Center(
+                        child: AspectRatio(
+                          aspectRatio: 1024 / 2048,
+                          child: _UploadPicker(bkgTex: localSlot.bkgTex),
+                        ),
+                      )
+                    : _CoverEditorBlock(
+                        key: ValueKey(
+                            'nr-${localSlot.bkgTex}-${localSlot.standeeShape}'),
+                        bkgTex: localSlot.bkgTex,
+                        layout: 1, // ignored when isNewRelease=true
+                        replacement: repl,
+                        isNewRelease: true,
+                        nrShape: localSlot.standeeShape,
+                        standeeMode: standeeMode,
+                      ),
+              ),
+              const SizedBox(height: kSp2),
+              Text(
+                localSlot.title.isEmpty ? '(untitled)' : localSlot.title,
+                style: const TextStyle(
+                  fontSize: kFsApp,
+                  fontWeight: FontWeight.w700,
+                  color: kColorCyan,
+                  letterSpacing: 1.5,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '${localSlot.bkgTex}  ·  shape ${localSlot.standeeShape}',
+                style: const TextStyle(
+                    fontSize: kFsMeta, color: kColorText3),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// "PREVIEW: VHS Tape | Standee" header strip above the NR cover.
+/// Content-sized so the parent Row can group it next to the Replace
+/// Image button (RR_VHS_Tool.py:7766-7787 — both controls live in the
+/// same `_vp_tab_inner` frame, packed left-to-right and centered).
+class _VhsStandeeToggle extends StatelessWidget {
+  final bool standeeMode;
+  final ValueChanged<bool> onChanged;
+  const _VhsStandeeToggle({
+    required this.standeeMode,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Widget btn(String label, bool active, VoidCallback onTap) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+              horizontal: kSp3, vertical: kSp1),
+          decoration: BoxDecoration(
+            color: active ? kColorCyan : kColorPanel,
+            border: Border.all(color: active ? kColorCyan : kColorBorder),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+              color: active ? kColorTextInv : kColorText2,
+              letterSpacing: 1,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          'PREVIEW:',
+          style: TextStyle(
+            fontFamily: kFontFamily,
+            fontSize: kFsMeta,
+            color: kColorText3,
+            letterSpacing: 1.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(width: kSp2),
+        btn('VHS Tape', !standeeMode, () => onChanged(false)),
+        btn('Standee', standeeMode, () => onChanged(true)),
+      ],
+    );
+  }
+}
+
+/// "🖼  Replace Image" button shown to the LEFT of the VHS/Standee toggle
+/// in the NR preview header.  Port of `_vp_replace_btn`
+/// (RR_VHS_Tool.py:7766-7771) — clicking opens the same OS file picker
+/// the right-rail UPLOAD/REPLACE button uses, and `setImage` preserves
+/// the existing offset/zoom (matches `_upload` at Z. 12651-12656).
+class _NrReplaceImageButton extends ConsumerStatefulWidget {
+  final String bkgTex;
+  const _NrReplaceImageButton({required this.bkgTex});
+
+  @override
+  ConsumerState<_NrReplaceImageButton> createState() =>
+      _NrReplaceImageButtonState();
+}
+
+class _NrReplaceImageButtonState
+    extends ConsumerState<_NrReplaceImageButton> {
+  bool _busy = false;
+  bool _hover = false;
+
+  Future<void> _pick() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+        dialogTitle: 'Pick replacement image for ${widget.bkgTex}',
+      );
+      if (result == null || result.files.isEmpty) return;
+      final path = result.files.single.path;
+      if (path == null) return;
+      await ref
+          .read(replacementsControllerProvider)
+          .setImage(widget.bkgTex, path);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: _busy ? null : _pick,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+              horizontal: kSp3, vertical: kSp1),
+          decoration: BoxDecoration(
+            color: _hover ? kColorPanel : kColorBorder,
+            border: Border.all(color: kColorBorder),
+          ),
+          child: Text(
+            '🖼  Replace Image',
+            style: TextStyle(
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+              color: _busy ? kColorText3 : kColorText,
+              letterSpacing: 1,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// _NrShapeSection / _NrShapeCard live in slot_options_panel.dart — the
+// picker belongs in the right-rail form column (matches Python's layout,
+// RR_VHS_Tool.py:8735-8776).  Removed from here to keep the preview
+// column focused on cover + cropper + zone labels.
+
 /// Click-to-upload placeholder shown when the slot has no image yet.
 /// Single-click opens a file picker — same code path as the right-rail
 /// UPLOAD button.
@@ -178,12 +426,26 @@ class _CoverEditorBlock extends ConsumerStatefulWidget {
   final String bkgTex;
   final int layout;
   final TextureReplacement replacement;
+  /// When true: layout-aware overlay is forced off and "fit visible"
+  /// resolves to fit-full-canvas (offset 0/0, zoom 1.0).  T_New_*
+  /// textures don't sit on a VHS that can hide parts of the cover, so
+  /// the layout overlay would just be misleading.
+  final bool isNewRelease;
+  /// Standee shape A/B/C — required when [isNewRelease] is true to drive
+  /// the zone-line / shape-overlay drawing on the cropper.
+  final String? nrShape;
+  /// True = draw shape-specific overlay (arch/folds/corners) on top of
+  /// the zone lines; false = zone lines only.
+  final bool standeeMode;
 
   const _CoverEditorBlock({
     super.key,
     required this.bkgTex,
     required this.layout,
     required this.replacement,
+    this.isNewRelease = false,
+    this.nrShape,
+    this.standeeMode = false,
   });
 
   @override
@@ -325,6 +587,16 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
     if (_fitting) return;
     setState(() => _fitting = true);
     try {
+      // For NRs the entire canvas IS visible, so "fit visible" reduces
+      // to the fill-canvas transform — no per-image dimensions lookup.
+      if (widget.isNewRelease) {
+        await _commitTransform(
+          offsetX: kFillCanvasTransform.offsetX,
+          offsetY: kFillCanvasTransform.offsetY,
+          zoom: kFillCanvasTransform.zoom,
+        );
+        return;
+      }
       final dims = await ref
           .read(imageDimensionsProvider(widget.replacement.path).future);
       if (dims == null) {
@@ -358,7 +630,12 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
     final imageGen = ref.watch(coverImageGenerationProvider(repl.path));
     final dimsAsync = ref.watch(imageDimensionsProvider(repl.path));
     final snapOn = ref.watch(snapEnabledProvider);
-    final overlayOn = ref.watch(layoutOverlayProvider);
+    // T_New textures cover the full 1024×2048 with no VHS framing, so the
+    // layout-aware overlay (red-hatched zones, cyan visible-area border)
+    // doesn't apply.  Force it off for NR slots — even when the user has
+    // overlay enabled globally for genre slots.
+    final overlayOn =
+        widget.isNewRelease ? false : ref.watch(layoutOverlayProvider);
     final frameDeco = BoxDecoration(
       color: kColorPanel,
       border: Border.all(color: kColorBorder),
@@ -395,6 +672,8 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
             imageGeneration: imageGen,
             snapEnabled: snapOn,
             showOverlay: overlayOn,
+            nrShape: widget.isNewRelease ? widget.nrShape : null,
+            standeeMode: widget.standeeMode,
             onPreview: _onCropperPreview,
             onCommit: _onCropperCommit,
             onMissing: (_) => _PreviewPlaceholder(
@@ -407,21 +686,70 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
       );
     }
 
+    final coverArea = Center(
+      child: AspectRatio(
+        aspectRatio: 1024 / 2048,
+        child: Container(
+          decoration: frameDeco,
+          clipBehavior: Clip.antiAlias,
+          child: cropperOrPlaceholder(),
+        ),
+      ),
+    );
+
+    // For NRs: paint zone-name labels in the gutters around the cover
+    // (Python's `_label_x = max(2, _real_dx - 6)` block at
+    // RR_VHS_Tool.py:12030-12084).  The painter sits in a Positioned.fill
+    // sibling so it can draw outside the cover's `clipBehavior`.
+    final coverWithLabels = (widget.isNewRelease && widget.nrShape != null)
+        ? Stack(
+            fit: StackFit.expand,
+            children: [
+              coverArea,
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: NrZoneLabelsPainter(
+                      shape: widget.nrShape!,
+                      standeeMode: widget.standeeMode,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          )
+        : coverArea;
+
+    final fileName = p.basename(repl.path);
+    final infoText = dimsAsync.maybeWhen(
+      data: (dims) => dims != null
+          ? '$fileName  —  ${dims.w} × ${dims.h} px'
+          : fileName,
+      orElse: () => fileName,
+    );
+
     return Column(
       children: [
-        Expanded(
-          child: Center(
-            child: AspectRatio(
-              aspectRatio: 1024 / 2048,
-              child: Container(
-                decoration: frameDeco,
-                clipBehavior: Clip.antiAlias,
-                child: cropperOrPlaceholder(),
-              ),
+        Expanded(child: coverWithLabels),
+        const SizedBox(height: kSp1),
+        // Filename + resolution under the cover — port of Python's
+        // `_info_var` row (RR_VHS_Tool.py:7954-7959, 11657-11675).
+        // Left-anchored, dim text, ellipsised so long paths don't push
+        // the editor bar around.
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            infoText,
+            style: const TextStyle(
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+              color: kColorText3,
             ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
         ),
-        const SizedBox(height: kSp2),
+        const SizedBox(height: kSp1),
         CropEditorBar(
           zoom: _zoom,
           enabled: true,

@@ -50,10 +50,13 @@ void main() {
       expect(loaded['T_Bkg_Hor_001']!.zoom, 1.0);
     });
 
-    test('setImage preserves existing offsetX/offsetY/zoom on path change',
+    test('setImage resets offsetX/offsetY/zoom to defaults on path change',
         () async {
-      // Seed the file with a fully-specified entry — exactly the shape Python
-      // writes when the user has tweaked the offsets/zoom via the cropper.
+      // Seed the file with a fully-specified entry — exactly the shape the
+      // user lands on after tweaking the cropper for the previous image.
+      // A new image should get a clean full-cover layout, NOT inherit the
+      // previous crop (per user feedback 2026-05-09 — divergence from
+      // Python's `_upload`, which preserves the prior transform).
       await ReplacementsDataSource(tmp.path).save({
         'T_Bkg_Wst_001': const TextureReplacement(
           path: 'C:/old.jpg',
@@ -70,9 +73,9 @@ void main() {
       final loaded = await read();
       final entry = loaded['T_Bkg_Wst_001']!;
       expect(entry.path, 'C:/new.jpg');
-      expect(entry.offsetX, 17);
-      expect(entry.offsetY, -197);
-      expect(entry.zoom, closeTo(0.778, 1e-9));
+      expect(entry.offsetX, 0);
+      expect(entry.offsetY, 0);
+      expect(entry.zoom, 1.0);
     });
 
     test('setImage leaves other slots untouched', () async {

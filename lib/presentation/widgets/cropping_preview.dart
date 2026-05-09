@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
+import '../../core/constants/standee_zones.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/services/cover_actions.dart';
 import '../providers/providers.dart';
@@ -72,6 +73,18 @@ class CroppingPreview extends StatefulWidget {
   /// Parent reads `layoutOverlayProvider` and passes it here.
   final bool showOverlay;
 
+  /// When non-null, paint the NR standee zone lines (gold/brown
+  /// title-plate / footer / frame) for this shape.  Mutually exclusive
+  /// with the layout-style overlay above — NRs cover the full canvas
+  /// and don't have a layout-1..5 visible area.  See
+  /// `lib/core/constants/standee_zones.dart` for geometry.
+  final String? nrShape;
+
+  /// When true (and [nrShape] is set), also paint the shape-specific
+  /// overlay: semicircle arch for A, vertical fold lines for B,
+  /// quarter-circle corner arcs for C.  Driven from `standeePreviewModeProvider`.
+  final bool standeeMode;
+
   const CroppingPreview({
     super.key,
     required this.file,
@@ -87,6 +100,8 @@ class CroppingPreview extends StatefulWidget {
     this.imageGeneration = 0,
     this.snapEnabled = true,
     this.showOverlay = false,
+    this.nrShape,
+    this.standeeMode = false,
   });
 
   @override
@@ -350,14 +365,33 @@ class _CroppingPreviewState extends State<CroppingPreview> {
                         // decode at vz=4 while staying sharp through 2×.
                         cacheWidthMultiplier: 4.0,
                         overlay: IgnorePointer(
-                          child: CustomPaint(
-                            size: size,
-                            painter: _SafeAreaOverlayPainter(
-                              layout: widget.layout,
-                              showOverlay: widget.showOverlay,
-                              centerSnapX: _centerSnapX,
-                              centerSnapY: _centerSnapY,
-                            ),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              CustomPaint(
+                                size: size,
+                                painter: _SafeAreaOverlayPainter(
+                                  layout: widget.layout,
+                                  // For NRs we never want the layout-style
+                                  // overlay — they don't have a layout 1..5
+                                  // visible area, and the red hatch would
+                                  // misrepresent what's hidden.
+                                  showOverlay: widget.nrShape != null
+                                      ? false
+                                      : widget.showOverlay,
+                                  centerSnapX: _centerSnapX,
+                                  centerSnapY: _centerSnapY,
+                                ),
+                              ),
+                              if (widget.nrShape != null)
+                                CustomPaint(
+                                  size: size,
+                                  painter: _NrZoneOverlayPainter(
+                                    shape: widget.nrShape!,
+                                    standeeMode: widget.standeeMode,
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
                       ),
@@ -587,6 +621,335 @@ class _SafeAreaOverlayPainter extends CustomPainter {
       old.showOverlay != showOverlay ||
       old.centerSnapX != centerSnapX ||
       old.centerSnapY != centerSnapY;
+}
+
+/// Paints the NR standee zone overlay on top of the cover.
+///
+/// VHS mode (standeeMode=false): only the gold/brown zone lines —
+/// title plate top, footer top, frame bottom, side plate margins.
+///
+/// Standee mode (standeeMode=true): zone lines PLUS shape-specific
+/// overlay — semicircle arch for A, vertical fold lines for B,
+/// quarter-circle corner arcs for C.
+///
+/// Pure port of the NR overlay drawing in RR_VHS_Tool.py:11943-12162.
+/// Coordinate system: [size] is the cropper canvas in display pixels,
+/// `kTextureBkgWidth × kTextureBkgHeight` (1024×2048) is the texture
+/// space.  All zone values come from [kStandeeZones] in texture space
+/// and are scaled to display via `size.width / kTextureBkgWidth`
+/// (X axis) and `size.height / kTextureBkgHeight` (Y axis).
+class _NrZoneOverlayPainter extends CustomPainter {
+  final String shape;
+  final bool standeeMode;
+  const _NrZoneOverlayPainter({required this.shape, required this.standeeMode});
+
+  // Python's gold/brown palette for zone lines (RR_VHS_Tool.py:11953-11960
+  // and 12015-12084).
+  static const Color _goldBright = Color(0xFFFFD84A);
+  static const Color _goldDim = Color(0xFFAA8830);
+  static const Color _brown = Color(0xFF665522);
+  static const Color _shapeAccent = Color(0xFF6688AA);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+    final z = standeeZonesFor(shape);
+    final sx = size.width / 1024;
+    final sy = size.height / 2048;
+
+    // ── Zone lines (drawn in both VHS and Standee modes) ───────────────
+    // Gold dashed line at front_end (top of title plate).
+    final tpY = z.frontEnd * sy;
+    _dashedLine(canvas,
+        Offset(0, tpY), Offset(size.width, tpY),
+        color: _goldBright, strokeWidth: 2, dash: 8, gap: 4);
+
+    // Dimmer gold dashed line at title_end (top of footer).
+    final ftY = z.titleEnd * sy;
+    _dashedLine(canvas,
+        Offset(0, ftY), Offset(size.width, ftY),
+        color: _goldDim, strokeWidth: 1, dash: 6, gap: 4);
+
+    // Dark brown dashed line at footer_end (bottom frame cutoff).
+    if (z.footerEnd < 2048) {
+      final foY = z.footerEnd * sy;
+      _dashedLine(canvas,
+          Offset(0, foY), Offset(size.width, foY),
+          color: _brown, strokeWidth: 1, dash: 4, gap: 4);
+    }
+
+    // Side plate margins.
+    if (z.plateLeft > 0) {
+      final x = z.plateLeft * sx;
+      _dashedLine(canvas, Offset(x, tpY), Offset(x, size.height),
+          color: _brown, strokeWidth: 1, dash: 3, gap: 3);
+    }
+    if (z.plateRight > 0) {
+      final x = size.width - z.plateRight * sx;
+      _dashedLine(canvas, Offset(x, tpY), Offset(x, size.height),
+          color: _brown, strokeWidth: 1, dash: 3, gap: 3);
+    }
+
+    if (!standeeMode) return;
+
+    // ── Shape-specific overlay (Standee mode only) ─────────────────────
+    if (z.foldLeft > 0) {
+      final x = z.foldLeft * sx;
+      _dashedLine(canvas, Offset(x, 0), Offset(x, tpY),
+          color: _shapeAccent, strokeWidth: 1, dash: 6, gap: 4);
+    }
+    if (z.foldRight > 0) {
+      final x = size.width - z.foldRight * sx;
+      _dashedLine(canvas, Offset(x, 0), Offset(x, tpY),
+          color: _shapeAccent, strokeWidth: 1, dash: 6, gap: 4);
+    }
+
+    if (z.archCenterY > 0 && z.archRadius > 0) {
+      // Standee A semicircle.  Centre at (texW/2, archCenterY); the arc
+      // is the upper half of an ellipse since X and Y display scales
+      // differ.
+      final cy = z.archCenterY * sy;
+      final cx = size.width / 2;
+      final rDispX = z.archRadius * sx;
+      final rDispY = z.archRadius * sy;
+      _dashedArc(
+        canvas,
+        Rect.fromLTRB(cx - rDispX, cy - rDispY, cx + rDispX, cy + rDispY),
+        startRad: 3.14159, // π — start at left
+        sweepRad: 3.14159, // sweep upward through 180° back to right
+        color: _shapeAccent,
+        strokeWidth: 2,
+        dash: 6,
+        gap: 3,
+      );
+      // Vertical insets where the arch meets the rectangle.
+      final inLeft = (1024 / 2 - z.archRadius) * sx;
+      final inRight = (1024 / 2 + z.archRadius) * sx;
+      _dashedLine(canvas, Offset(inLeft, 0), Offset(inLeft, cy),
+          color: _shapeAccent, strokeWidth: 1, dash: 3, gap: 4);
+      _dashedLine(canvas, Offset(inRight, 0), Offset(inRight, cy),
+          color: _shapeAccent, strokeWidth: 1, dash: 3, gap: 4);
+      // Shoulder lines from canvas edge to inset at y=cy.
+      _dashedLine(canvas, Offset(0, cy), Offset(inLeft, cy),
+          color: _shapeAccent, strokeWidth: 1, dash: 3, gap: 4);
+      _dashedLine(canvas, Offset(inRight, cy), Offset(size.width, cy),
+          color: _shapeAccent, strokeWidth: 1, dash: 3, gap: 4);
+    }
+
+    if (z.cornerRadius > 0) {
+      // Standee C rounded corners.  Quarter arcs in each top corner.
+      final rx = z.cornerRadius * sx;
+      final ry = z.cornerRadius * sy;
+      // Top-left arc — sweeps from 90° (left) to 180° (top).  In Flutter,
+      // angle 0 = +X axis, π/2 = +Y axis (screen coords). drawArc with
+      // startAngle=π and sweepAngle=π/2 sweeps from "leftward" up through
+      // to "upward" — that's the inner curve of the corner.
+      _dashedArc(canvas,
+          Rect.fromLTRB(0, 0, 2 * rx, 2 * ry),
+          startRad: 3.14159, // π
+          sweepRad: 1.5708, // π/2
+          color: _shapeAccent,
+          strokeWidth: 1,
+          dash: 4,
+          gap: 3);
+      // Top-right arc.  startAngle=3π/2 ("up"), sweep π/2 to "right".
+      _dashedArc(canvas,
+          Rect.fromLTRB(size.width - 2 * rx, 0, size.width, 2 * ry),
+          startRad: 4.71239, // 3π/2
+          sweepRad: 1.5708,
+          color: _shapeAccent,
+          strokeWidth: 1,
+          dash: 4,
+          gap: 3);
+      // Short indicator strokes where the rounding starts.
+      final p = Paint()
+        ..color = _shapeAccent
+        ..strokeWidth = 1
+        ..style = PaintingStyle.stroke;
+      canvas.drawLine(Offset(0, ry), Offset(rx / 3, ry), p);
+      canvas.drawLine(Offset(rx, 0), Offset(rx, ry / 3), p);
+      canvas.drawLine(
+          Offset(size.width, ry), Offset(size.width - rx / 3, ry), p);
+      canvas.drawLine(
+          Offset(size.width - rx, 0), Offset(size.width - rx, ry / 3), p);
+    }
+  }
+
+  void _dashedLine(Canvas canvas, Offset a, Offset b,
+      {required Color color,
+      required double strokeWidth,
+      required double dash,
+      required double gap}) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke;
+    final total = (b - a).distance;
+    if (total == 0) return;
+    final ux = (b.dx - a.dx) / total;
+    final uy = (b.dy - a.dy) / total;
+    var t = 0.0;
+    while (t < total) {
+      final t2 = (t + dash).clamp(0.0, total);
+      canvas.drawLine(
+        Offset(a.dx + ux * t, a.dy + uy * t),
+        Offset(a.dx + ux * t2, a.dy + uy * t2),
+        paint,
+      );
+      t += dash + gap;
+    }
+  }
+
+  void _dashedArc(Canvas canvas, Rect rect,
+      {required double startRad,
+      required double sweepRad,
+      required Color color,
+      required double strokeWidth,
+      required double dash,
+      required double gap}) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke;
+    // Approximate dashing by stepping through the arc in small angular
+    // slices.  ~1° per step is enough for visually smooth dashes.
+    const stepRad = 0.01745;
+    final radius = (rect.width.abs() + rect.height.abs()) / 4;
+    final dashRad = dash / radius;
+    final gapRad = gap / radius;
+    var a = startRad;
+    final end = startRad + sweepRad;
+    while (a < end) {
+      final segEnd = (a + dashRad).clamp(startRad, end);
+      canvas.drawArc(rect, a, segEnd - a, false, paint);
+      a += dashRad + gapRad;
+      // Suppress unused-warning for stepRad if compiler optimises out:
+      if (stepRad < 0) break;
+    }
+  }
+
+  @override
+  bool shouldRepaint(_NrZoneOverlayPainter old) =>
+      old.shape != shape || old.standeeMode != standeeMode;
+}
+
+/// Paints zone-name labels in the gutter LEFT of the NR cover (and a
+/// matching "← fold" label in the right gutter for Standee B).  Pure port
+/// of the `canvas.create_text` calls in `_render_preview_canvas`
+/// (RR_VHS_Tool.py:12030-12084 + 12123-12126).
+///
+/// Layout assumption: the painter is rendered as a sibling of a centered
+/// `AspectRatio(1024/2048)` cover inside a Stack/Positioned.fill, so its
+/// `size` is the column's full width × the cover's height.  The cover
+/// width is `size.height / 2` and is centred horizontally — labels are
+/// positioned by recomputing those bounds, not by reading them out of the
+/// child.
+///
+/// All Y values come from [kStandeeZones] in 1024×2048 texture space and
+/// are scaled to display via `coverHeight / 2048`.  Label X is anchored
+/// to `max(2, coverLeft - 6)` (right-aligned for left-gutter labels),
+/// matching Pythons `_label_x = max(2, _real_dx - 6)` (Z. 12074).
+///
+/// Viewport zoom/pan inside the cropper is intentionally NOT applied:
+/// labels stay anchored to the cropper FRAME, not the live viewport.
+/// Wheel-zooming the cover will desync labels from their lines — accepted
+/// trade-off for keeping the labels outside `Transform`/`ClipRect`.
+class NrZoneLabelsPainter extends CustomPainter {
+  final String shape;
+  final bool standeeMode;
+  const NrZoneLabelsPainter({required this.shape, required this.standeeMode});
+
+  // Same palette as _NrZoneOverlayPainter so labels colour-match their lines.
+  static const Color _goldBright = Color(0xFFFFD84A);
+  static const Color _goldDim = Color(0xFFAA8830);
+  static const Color _brown = Color(0xFF665522);
+  static const Color _shapeAccent = Color(0xFF6688AA);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+    final z = standeeZonesFor(shape);
+
+    // Cover bounds inside the painter's box.  AspectRatio 1024:2048 takes
+    // the full available height and is centred horizontally.
+    final coverHeight = size.height;
+    final coverWidth = coverHeight / 2;
+    final coverLeft = (size.width - coverWidth) / 2;
+    final coverRight = coverLeft + coverWidth;
+    if (coverWidth <= 0) return;
+
+    final tpY = z.frontEnd * coverHeight / 2048;
+    final ftY = z.titleEnd * coverHeight / 2048;
+    final foY = z.footerEnd < 2048
+        ? z.footerEnd * coverHeight / 2048
+        : coverHeight;
+
+    // Pythons `_label_x = max(2, _real_dx - 6)` — clamp so labels never
+    // fall off the very left edge of the column when the gutter is small.
+    final labelX = (coverLeft - 6).clamp(2.0, double.infinity);
+
+    // ── Title plate ────────────────────────────────────────────────────
+    final titleText = z.titleBelowFooter
+        ? 'Title plate (shown below footer on standee)'
+        : 'Title plate';
+    _paintRightAligned(canvas, labelX, (tpY + ftY) / 2, titleText, _goldBright);
+
+    // ── Footer / base ──────────────────────────────────────────────────
+    _paintRightAligned(
+        canvas, labelX, (ftY + foY) / 2, 'Footer / base', _goldDim);
+
+    // ── Frame color ────────────────────────────────────────────────────
+    if (z.footerEnd < 2048) {
+      _paintRightAligned(
+          canvas, labelX, (foY + coverHeight) / 2, 'Frame color', _brown);
+    }
+
+    if (!standeeMode) return;
+
+    // ── Standee A: Arch label at archCenterY ───────────────────────────
+    if (z.archCenterY > 0 && z.archRadius > 0) {
+      final archY = z.archCenterY * coverHeight / 2048;
+      _paintRightAligned(canvas, labelX, archY, 'Arch', _shapeAccent);
+    }
+
+    // ── Standee B: fold labels at top of both gutters ──────────────────
+    if (z.foldLeft > 0 || z.foldRight > 0) {
+      _paintRightAligned(canvas, labelX, 14, 'fold →', _shapeAccent);
+      _paintLeftAligned(
+          canvas, coverRight + 6, 14, '← fold', _shapeAccent);
+    }
+  }
+
+  void _paintRightAligned(
+      Canvas canvas, double xRight, double yMid, String text, Color color) {
+    final tp = _layoutText(text, color);
+    tp.paint(canvas, Offset(xRight - tp.width, yMid - tp.height / 2));
+  }
+
+  void _paintLeftAligned(
+      Canvas canvas, double xLeft, double yMid, String text, Color color) {
+    final tp = _layoutText(text, color);
+    tp.paint(canvas, Offset(xLeft, yMid - tp.height / 2));
+  }
+
+  TextPainter _layoutText(String text, Color color) {
+    return TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontFamily: kFontFamily,
+          fontSize: kFsMeta,
+          fontWeight: FontWeight.w700,
+          color: color,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+  }
+
+  @override
+  bool shouldRepaint(NrZoneLabelsPainter old) =>
+      old.shape != shape || old.standeeMode != standeeMode;
 }
 
 /// Bottom-left HUD overlay listing the cropper's mouse bindings + a

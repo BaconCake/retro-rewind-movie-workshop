@@ -465,9 +465,12 @@ class _Placeholder extends StatelessWidget {
 }
 
 /// NR shelf — sibling to [_SlotGrid] but driven by [nrSlotsProvider].
-/// No image thumbnails (NR covers come from base-game `T_New_*` textures
-/// at the moment; if we ever pre-decode them, this is the place to plug
-/// them in).
+/// Renders as a FLAT vertical list of rows (genre-coloured 3-letter badge
+/// + title), matching Python's NR shelf at RR_VHS_Tool.py:10642-10682.
+/// The card-grid layout the genre shelf uses doesn't apply here — NR
+/// covers come from base-game `T_New_*` textures that aren't pre-decoded
+/// for shelf preview, so a row-list is both closer to Python and more
+/// information-dense per pixel.
 class _NrSlotGrid extends ConsumerWidget {
   final List<NewReleaseSlot> slots;
   const _NrSlotGrid({required this.slots});
@@ -476,24 +479,16 @@ class _NrSlotGrid extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedBkg = ref.watch(selectedSlotBkgProvider);
 
-    return GridView.builder(
-      padding: const EdgeInsets.all(kSp3),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 180,
-        childAspectRatio: 0.55,
-        crossAxisSpacing: kSp3,
-        mainAxisSpacing: kSp3,
-      ),
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: kSp2),
       itemCount: slots.length + 1,
       itemBuilder: (context, i) {
-        if (i == slots.length) {
-          return _AddNrTile(
-            onTap: () => AddNrSlotDialog.show(context),
-          );
+        if (i == 0) {
+          return _AddNrRow(onTap: () => AddNrSlotDialog.show(context));
         }
-        final slot = slots[i];
+        final slot = slots[i - 1];
         final selKey = '$kNrSelectionPrefix${slot.sku}';
-        return _NrSlotCard(
+        return _NrSlotRow(
           slot: slot,
           selected: selKey == selectedBkg,
           onTap: () =>
@@ -504,11 +499,13 @@ class _NrSlotGrid extends ConsumerWidget {
   }
 }
 
-/// "+ ADD NEW RELEASE" tile — same dashed-pink-border treatment as the
-/// genre-side [_AddSlotTile], visually consistent across both shelves.
-class _AddNrTile extends StatelessWidget {
+/// Add-NR row — single full-width strip with a dashed pink border + "+"
+/// glyph, matching the visual language of the genre shelf's [_AddSlotTile]
+/// but shaped to fit the NR row layout.  Sits at the top of the list so a
+/// fresh NR creation lands above existing rows (no scroll needed).
+class _AddNrRow extends StatelessWidget {
   final VoidCallback onTap;
-  const _AddNrTile({required this.onTap});
+  const _AddNrRow({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -516,29 +513,29 @@ class _AddNrTile extends StatelessWidget {
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: onTap,
-        child: CustomPaint(
-          painter: _DashedBorderPainter(color: kColorPink),
-          child: Container(
-            color: kColorPanel,
-            alignment: Alignment.center,
-            padding: const EdgeInsets.all(kSp3),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.add, color: kColorPink, size: 36),
-                const SizedBox(height: kSp1),
-                const Text(
-                  'ADD NEW\nRELEASE',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: kFsMeta,
-                    fontWeight: FontWeight.w700,
-                    color: kColorPink,
-                    letterSpacing: 1.5,
-                    height: 1.2,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(kSp2, 0, kSp2, kSp1),
+          child: CustomPaint(
+            painter: _DashedBorderPainter(color: kColorPink),
+            child: Container(
+              color: kColorPanel,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: kSp2, vertical: kSp2),
+              child: const Row(
+                children: [
+                  Icon(Icons.add, color: kColorPink, size: 18),
+                  SizedBox(width: kSp2),
+                  Text(
+                    'ADD NEW RELEASE',
+                    style: TextStyle(
+                      fontSize: kFsMeta,
+                      fontWeight: FontWeight.w700,
+                      color: kColorPink,
+                      letterSpacing: 1.5,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -547,113 +544,97 @@ class _AddNrTile extends StatelessWidget {
   }
 }
 
-class _NrSlotCard extends StatelessWidget {
+/// One NR row in the shelf list.  Layout: [GENRE BADGE]  [Title text].
+/// Genre badge uses [kGenreColors] (Python `GENRE_COLORS`); selected row
+/// gets a 1px cyan border + cyan title + brighter background, matching
+/// Python's selection treatment at RR_VHS_Tool.py:10650-10672.
+class _NrSlotRow extends StatefulWidget {
   final NewReleaseSlot slot;
   final bool selected;
   final VoidCallback onTap;
 
-  const _NrSlotCard({
+  const _NrSlotRow({
     required this.slot,
     required this.selected,
     required this.onTap,
   });
 
   @override
+  State<_NrSlotRow> createState() => _NrSlotRowState();
+}
+
+class _NrSlotRowState extends State<_NrSlotRow> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
-    final borderColor = selected ? kColorCyan : kColorBorder;
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: kColorPanel,
-          border: Border.all(
-            color: borderColor,
-            width: selected ? 2 : 1,
+    final s = widget.slot;
+    // Genre badge colours — fall back to neutral border/text3 when the
+    // genre isn't in the colours map (matches Pythons `.get(..., {})`
+    // fallback at RR_VHS_Tool.py:10659-10661).
+    final gc = kGenreColors[s.genre];
+    final badgeBg = gc?.bg ?? kColorBorder;
+    final badgeFg = gc?.fg ?? kColorText3;
+
+    final rowBg = widget.selected
+        ? kColorPanel
+        : (_hover ? kColorPanel : kColorSurface);
+    final titleColor = widget.selected ? kColorCyan : kColorText;
+
+    // Genre code: prefer the entitys 3-letter `genreCode`; fall back to
+    // first-3-of-genre-name (Pythons `nr['genre'][:3].upper()`).
+    final code = (s.genreCode.isNotEmpty
+            ? s.genreCode
+            : (s.genre.length >= 3 ? s.genre.substring(0, 3) : s.genre))
+        .toUpperCase();
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: kSp2, vertical: 1),
+          decoration: BoxDecoration(
+            color: rowBg,
+            border: widget.selected
+                ? Border.all(color: kColorCyan, width: 1)
+                : null,
           ),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: Container(
-                color: kColorBg,
-                alignment: Alignment.center,
-                padding: const EdgeInsets.all(kSp2),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // Genre code as the dominant visual — gives the user
-                    // an instant read of which shelf this NR will land on.
-                    Text(
-                      slot.genreCode.toUpperCase(),
-                      style: const TextStyle(
-                        fontSize: 32,
-                        fontWeight: FontWeight.w700,
-                        color: kColorCyan,
-                        letterSpacing: 2,
-                      ),
-                    ),
-                    const SizedBox(height: kSp1),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: kSp1, vertical: 2),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: kColorPink, width: 1),
-                      ),
-                      child: Text(
-                        'STANDEE ${slot.standeeShape}',
-                        style: const TextStyle(
-                          fontSize: kFsMeta,
-                          fontWeight: FontWeight.w700,
-                          color: kColorPink,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                    ),
-                  ],
+          padding: const EdgeInsets.symmetric(horizontal: kSp2, vertical: kSp1),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: kSp2, vertical: 2),
+                color: badgeBg,
+                child: Text(
+                  code,
+                  style: TextStyle(
+                    fontFamily: kFontFamily,
+                    fontSize: kFsMeta,
+                    fontWeight: FontWeight.w700,
+                    color: badgeFg,
+                    letterSpacing: 1,
+                  ),
                 ),
               ),
-            ),
-            Container(
-              padding: const EdgeInsets.fromLTRB(kSp2, kSp1, kSp2, kSp2),
-              decoration: const BoxDecoration(
-                color: kColorPanel,
-                border: Border(top: BorderSide(color: kColorBorder)),
+              const SizedBox(width: kSp2),
+              Expanded(
+                child: Text(
+                  s.title.isEmpty ? '(untitled)' : s.title,
+                  style: TextStyle(
+                    fontFamily: kFontFamily,
+                    fontSize: kFsBody,
+                    color: titleColor,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    slot.title.isEmpty ? '(untitled)' : slot.title,
-                    style: const TextStyle(
-                      fontSize: kFsMeta,
-                      fontWeight: FontWeight.w700,
-                      color: kColorText,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    slot.bkgTex,
-                    style: const TextStyle(
-                      fontSize: kFsMeta,
-                      color: kColorText3,
-                    ),
-                  ),
-                  Text(
-                    'SKU ${slot.sku}',
-                    style: const TextStyle(
-                      fontSize: kFsMeta,
-                      color: kColorText3,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
