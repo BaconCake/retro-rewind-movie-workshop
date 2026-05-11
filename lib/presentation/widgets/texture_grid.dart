@@ -8,11 +8,13 @@ import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
+import '../../domain/sort.dart';
 import '../providers/providers.dart';
 import 'add_nr_slot_dialog.dart';
 import 'add_slot_dialog.dart';
 import 'cover_image.dart';
 import 'slot_status_badge.dart';
+import 'sort_header_bar.dart';
 
 /// Shelf of custom slot cards for the active tab (left column of the
 /// 3-column main layout — mirrors Python's "shelf" panel
@@ -31,33 +33,62 @@ class TextureGrid extends ConsumerWidget {
     final replacements = ref.watch(replacementsProvider);
 
     final tracking = ref.watch(trackingProvider);
+    // Per-tab sort.  "All Movies" intentionally never sorts — briefing
+    // §5.4 keeps the multi-genre overview in genre order so the user
+    // can scan it as a single contiguous list.
+    final sortKey = tab == 'All Movies'
+        ? null
+        : ref.watch(sortPrefsProvider.notifier).getForTab(tab);
+    // Watching sortPrefsProvider itself triggers rebuild on selection
+    // change.  getForTab reads from the latest state, so this watch is
+    // what makes the grid resort when the user picks a new option.
+    ref.watch(sortPrefsProvider);
 
     if (tab == 'New Releases') {
       final nrAsync = ref.watch(nrSlotsProvider);
-      return nrAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, st) => _ErrorBanner(message: '$e'),
-        data: (slots) => _NrSlotGrid(
-          slots: slots,
-          edited: tracking.edited,
-          shipped: tracking.shipped,
-        ),
+      return Column(
+        children: [
+          SortHeaderBar(tabName: tab),
+          Expanded(
+            child: nrAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, st) => _ErrorBanner(message: '$e'),
+              data: (slots) => _NrSlotGrid(
+                slots: sortKey == null ? slots : sortNrSlots(slots, sortKey),
+                edited: tracking.edited,
+                shipped: tracking.shipped,
+              ),
+            ),
+          ),
+        ],
       );
     }
 
-    return customSlots.when(
+    final gridContent = customSlots.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, st) => _ErrorBanner(message: '$e'),
       data: (slotsByDt) => replacements.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, st) => _ErrorBanner(message: '$e'),
-        data: (replMap) => _SlotGrid(
-          slots: _slotsForTab(tab, slotsByDt),
-          replacements: replMap,
-          edited: tracking.edited,
-          shipped: tracking.shipped,
-        ),
+        data: (replMap) {
+          final raw = _slotsForTab(tab, slotsByDt);
+          final ordered = sortKey == null ? raw : sortSlots(raw, sortKey);
+          return _SlotGrid(
+            slots: ordered,
+            replacements: replMap,
+            edited: tracking.edited,
+            shipped: tracking.shipped,
+          );
+        },
       ),
+    );
+    // No sort UI on "All Movies"; render the grid plainly.
+    if (tab == 'All Movies') return gridContent;
+    return Column(
+      children: [
+        SortHeaderBar(tabName: tab),
+        Expanded(child: gridContent),
+      ],
     );
   }
 

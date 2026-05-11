@@ -10,6 +10,7 @@ import '../../data/datasources/custom_slots_data_source.dart';
 import '../../data/datasources/json_file_data_source.dart';
 import '../../data/datasources/nr_slots_data_source.dart';
 import '../../data/datasources/replacements_data_source.dart';
+import '../../data/datasources/sort_prefs_data_source.dart';
 import '../../data/datasources/tracking_set_data_source.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../data/repositories/config_repository_impl.dart';
@@ -25,6 +26,7 @@ import '../../domain/entities/texture.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../../domain/nr_slot_logic.dart';
 import '../../domain/replacements_migration.dart';
+import '../../domain/sort.dart';
 import '../../domain/tracking.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
@@ -683,6 +685,48 @@ final snapEnabledProvider = StateProvider<bool>((_) => true);
 /// visibility.  Python likewise draws snap guides as separate canvas
 /// items independent of `_layout_preview` (RR_VHS_Tool.py:11450-11502).
 final layoutOverlayProvider = StateProvider<bool>((_) => false);
+
+/// Per-tab sort preference map.  Same StateNotifier pattern as
+/// [trackingProvider] so a tab switch / sort selection updates the
+/// shelf synchronously — no AsyncValue flicker.  Persists every change
+/// to `sort_preferences.json` in the working dir.  Python parity:
+/// `_sort_prefs` (RR_VHS_Tool.py:7454) + `_on_sort_selected`
+/// (Z. 11106-11118).
+///
+/// `"All Movies"` is intentionally never keyed — the shelf hides the
+/// dropdown on that tab (briefing §5.4).  NR tab uses the literal key
+/// `"New Releases"` to match Python.
+class SortPrefsNotifier extends StateNotifier<Map<String, String>> {
+  final Ref _ref;
+  SortPrefsNotifier(this._ref) : super(const <String, String>{}) {
+    _load();
+  }
+
+  SortPrefsDataSource _ds() =>
+      SortPrefsDataSource(_ref.read(workingDirProvider));
+
+  Future<void> _load() async {
+    final loaded = await _ds().load();
+    if (!mounted) return;
+    state = loaded;
+  }
+
+  /// Returns the sort key for [tabName], falling back to
+  /// [kDefaultSortKey] when the tab has no saved preference yet.
+  SortKey getForTab(String tabName) =>
+      SortKey.fromWireKey(state[tabName]);
+
+  Future<void> setForTab(String tabName, SortKey key) async {
+    if (state[tabName] == key.wireKey) return;
+    final next = <String, String>{...state, tabName: key.wireKey};
+    state = next;
+    await _ds().save(next);
+  }
+}
+
+final sortPrefsProvider =
+    StateNotifierProvider<SortPrefsNotifier, Map<String, String>>(
+        (ref) => SortPrefsNotifier(ref));
 
 /// Per-path counter bumped after a file rewrite (e.g. ↻ Rotate).  Mixed
 /// into `Image.file` keys for that specific path so the stale cached
