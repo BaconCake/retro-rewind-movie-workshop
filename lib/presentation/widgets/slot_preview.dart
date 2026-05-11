@@ -11,6 +11,7 @@ import '../../data/services/cover_actions.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
+import 'cover_drop_paste_zone.dart';
 import 'crop_editor_bar.dart';
 import 'cropping_preview.dart';
 import 'layout_style_picker.dart';
@@ -29,7 +30,8 @@ class SlotPreview extends ConsumerWidget {
     final selectedBkg = ref.watch(selectedSlotBkgProvider);
 
     if (selectedBkg == null) {
-      return const _EmptyState();
+      return const CoverDropPasteZone(
+          bkgTex: null, child: _EmptyState());
     }
 
     // NR slots are routed to a dedicated preview that supports the
@@ -38,7 +40,10 @@ class SlotPreview extends ConsumerWidget {
     if (selectedBkg.startsWith(kNrSelectionPrefix)) {
       final sku =
           int.tryParse(selectedBkg.substring(kNrSelectionPrefix.length));
-      if (sku == null) return const _EmptyState();
+      if (sku == null) {
+        return const CoverDropPasteZone(
+            bkgTex: null, child: _EmptyState());
+      }
       return _NrSlotPreview(sku: sku);
     }
 
@@ -53,12 +58,15 @@ class SlotPreview extends ConsumerWidget {
 
     final slot = _findSlot(slots, selectedBkg);
     if (slot == null) {
-      return const _EmptyState();
+      return const CoverDropPasteZone(
+          bkgTex: null, child: _EmptyState());
     }
 
     final repl = replacements[slot.bkgTex];
 
-    return Padding(
+    return CoverDropPasteZone(
+      bkgTex: slot.bkgTex,
+      child: Padding(
       padding: const EdgeInsets.all(kSp4),
       child: Column(
         children: [
@@ -105,6 +113,7 @@ class SlotPreview extends ConsumerWidget {
             },
           ),
         ],
+      ),
       ),
     );
   }
@@ -154,12 +163,17 @@ class _NrSlotPreview extends ConsumerWidget {
             break;
           }
         }
-        if (slot == null) return const _EmptyState();
+        if (slot == null) {
+          return const CoverDropPasteZone(
+              bkgTex: null, child: _EmptyState());
+        }
         final repl = replacements[slot.bkgTex];
         final standeeMode = ref.watch(standeePreviewModeProvider);
         final localSlot = slot;
 
-        return Padding(
+        return CoverDropPasteZone(
+          bkgTex: localSlot.bkgTex,
+          child: Padding(
           padding: const EdgeInsets.all(kSp4),
           child: Column(
             children: [
@@ -214,6 +228,7 @@ class _NrSlotPreview extends ConsumerWidget {
                     fontSize: kFsMeta, color: kColorText3),
               ),
             ],
+          ),
           ),
         );
       },

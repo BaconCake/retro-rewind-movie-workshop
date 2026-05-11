@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../providers/providers.dart';
+import '../widgets/cover_drop_paste_zone.dart';
 import '../widgets/genre_tab_bar.dart';
 import '../widgets/setup_dialog.dart';
 import '../widgets/slot_options_panel.dart';
@@ -81,21 +83,39 @@ class _HomePageState extends ConsumerState<HomePage> {
           const SizedBox(width: kSp2),
         ],
       ),
-      body: Column(
-        children: const [
-          GenreTabBar(),
-          Expanded(
-            child: Row(
-              children: [
-                SizedBox(width: 420, child: TextureGrid()),
-                VerticalDivider(width: 1),
-                Expanded(child: SlotPreview()),
-                VerticalDivider(width: 1),
-                SlotOptionsPanel(),
-              ],
-            ),
+      // App-level Ctrl+V handler.  Lives here (not on the preview pane)
+      // so the shortcut works regardless of which widget currently has
+      // keyboard focus — pasteClipboardImageToActiveSlot itself bails
+      // out when a TextField is focused so text paste still works.
+      body: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
+              pasteClipboardImageToActiveSlot(ref, context),
+          const SingleActivator(LogicalKeyboardKey.keyV, meta: true): () =>
+              pasteClipboardImageToActiveSlot(ref, context),
+        },
+        // FocusScope under the shortcuts so they're always considered
+        // active for the home page subtree.  autofocus makes the chord
+        // resolve without the user having to click anywhere first.
+        child: Focus(
+          autofocus: true,
+          child: Column(
+            children: const [
+              GenreTabBar(),
+              Expanded(
+                child: Row(
+                  children: [
+                    SizedBox(width: 420, child: TextureGrid()),
+                    VerticalDivider(width: 1),
+                    Expanded(child: SlotPreview()),
+                    VerticalDivider(width: 1),
+                    SlotOptionsPanel(),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
