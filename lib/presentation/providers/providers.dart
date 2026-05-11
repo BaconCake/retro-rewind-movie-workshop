@@ -22,6 +22,7 @@ import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../../domain/nr_slot_logic.dart';
+import '../../domain/replacements_migration.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
 import '../../domain/repositories/texture_repository.dart';
@@ -119,10 +120,23 @@ final customSlotsProvider =
 
 /// Per-texture replacement entries, sourced from `replacements.json`.
 /// Reactive in the same way as [customSlotsProvider].
+///
+/// Runs the legacy-key migration on load (Python parity with
+/// `load_replacements` at RR_VHS_Tool.py:3022-3038): legacy 2-digit
+/// `T_Bkg_<code>_NN` and `T_New_<code>_NN` keys are rewritten to the
+/// v1.8.2 3-digit form and the file is re-persisted when anything
+/// changed.  Closes the gap left by slice 2a.5 which migrated
+/// `nr_custom_slots.json` but not `replacements.json`.
 final replacementsProvider =
     FutureProvider<Map<String, TextureReplacement>>((ref) async {
   final dir = ref.watch(workingDirProvider);
-  return ReplacementsDataSource(dir).load();
+  final ds = ReplacementsDataSource(dir);
+  final raw = await ds.load();
+  final migrated = applyReplacementsKeyMigration(raw);
+  if (migrated.migrated > 0) {
+    await ds.save(migrated.entries);
+  }
+  return migrated.entries;
 });
 
 /// Mutator for `replacements.json`.  Reads the current state, applies a
