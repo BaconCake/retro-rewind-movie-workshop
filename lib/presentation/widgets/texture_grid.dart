@@ -30,24 +30,21 @@ class TextureGrid extends ConsumerWidget {
     final customSlots = ref.watch(customSlotsProvider);
     final replacements = ref.watch(replacementsProvider);
 
+    final tracking = ref.watch(trackingProvider);
+
     if (tab == 'New Releases') {
       final nrAsync = ref.watch(nrSlotsProvider);
-      final edited = ref
-          .watch(editedSlotsProvider)
-          .maybeWhen(data: (s) => s, orElse: () => const <String>{});
-      final shipped = ref
-          .watch(shippedSlotsProvider)
-          .maybeWhen(data: (s) => s, orElse: () => const <String>{});
       return nrAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, st) => _ErrorBanner(message: '$e'),
-        data: (slots) =>
-            _NrSlotGrid(slots: slots, edited: edited, shipped: shipped),
+        data: (slots) => _NrSlotGrid(
+          slots: slots,
+          edited: tracking.edited,
+          shipped: tracking.shipped,
+        ),
       );
     }
 
-    final edited = ref.watch(editedSlotsProvider);
-    final shipped = ref.watch(shippedSlotsProvider);
     return customSlots.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, st) => _ErrorBanner(message: '$e'),
@@ -57,11 +54,8 @@ class TextureGrid extends ConsumerWidget {
         data: (replMap) => _SlotGrid(
           slots: _slotsForTab(tab, slotsByDt),
           replacements: replMap,
-          // Status sets are optional — when tracking hasn't loaded yet
-          // (or errored) we just skip the badges; missing badges are
-          // strictly better UX than a flicker or an exception banner.
-          edited: edited.maybeWhen(data: (s) => s, orElse: () => const <String>{}),
-          shipped: shipped.maybeWhen(data: (s) => s, orElse: () => const <String>{}),
+          edited: tracking.edited,
+          shipped: tracking.shipped,
         ),
       ),
     );

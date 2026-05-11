@@ -68,20 +68,15 @@ class _SlotOptionsHeader extends ConsumerWidget {
         trackingKey = selected; // genre slot key == bkgTex
       }
     }
-    final edited = ref
-        .watch(editedSlotsProvider)
-        .maybeWhen(data: (s) => s, orElse: () => const <String>{});
-    final shipped = ref
-        .watch(shippedSlotsProvider)
-        .maybeWhen(data: (s) => s, orElse: () => const <String>{});
+    final tracking = ref.watch(trackingProvider);
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         const _SectionHeader('SLOT OPTIONS'),
         if (trackingKey != null)
           SlotStatusBadge(
-            isEdited: edited.contains(trackingKey),
-            isShipped: shipped.contains(trackingKey),
+            isEdited: tracking.edited.contains(trackingKey),
+            isShipped: tracking.shipped.contains(trackingKey),
           ),
       ],
     );

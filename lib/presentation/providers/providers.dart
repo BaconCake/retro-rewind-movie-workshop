@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
@@ -172,7 +173,7 @@ class ReplacementsController {
     );
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
-    await _ref.read(trackingControllerProvider).markEditedForBkgTex(bkgTex);
+    await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
   }
 
   Future<void> removeImage(String bkgTex) async {
@@ -183,7 +184,7 @@ class ReplacementsController {
     final next = Map<String, TextureReplacement>.from(current)..remove(bkgTex);
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
-    await _ref.read(trackingControllerProvider).markEditedForBkgTex(bkgTex);
+    await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
   }
 
   /// Update the (offsetX, offsetY, zoom) crop transform for an existing
@@ -209,7 +210,7 @@ class ReplacementsController {
     );
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
-    await _ref.read(trackingControllerProvider).markEditedForBkgTex(bkgTex);
+    await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
   }
 }
 
@@ -249,7 +250,7 @@ class SlotsController {
     await ds.save(next);
     _ref.invalidate(customSlotsProvider);
     await _ref
-        .read(trackingControllerProvider)
+        .read(trackingProvider.notifier)
         .markEdited(genreSlotKey(updated));
   }
 
@@ -315,7 +316,7 @@ class SlotsController {
     _ref.invalidate(customSlotsProvider);
     // A brand-new slot has by definition not been shipped yet, so it
     // shows the "Edited since last build" badge until the next build.
-    await _ref.read(trackingControllerProvider).markEdited(bkgTex);
+    await _ref.read(trackingProvider.notifier).markEdited(bkgTex);
     return bkgTex;
   }
 
@@ -362,7 +363,7 @@ class SlotsController {
     // Change 3: drop this slot from both tracking sets so a deleted-
     // then-rebuilt slot doesn't appear shipped against a key that no
     // longer exists.  Python parity at RR_VHS_Tool.py:10767-10773.
-    await _ref.read(trackingControllerProvider).removeKey(bkgTex);
+    await _ref.read(trackingProvider.notifier).removeKey(bkgTex);
   }
 }
 
@@ -402,88 +403,96 @@ final nrSlotsProvider = FutureProvider<List<NewReleaseSlot>>((ref) async {
 const _kEditedSlotsFile = 'edited_slots.json';
 const _kShippedSlotsFile = 'shipped_slots.json';
 
-/// "Edited since last build" tracking set, sourced from
-/// `edited_slots.json`.  Keys follow Python's wire format so the file
-/// is portable between the two tools — see `genreSlotKey` / `nrSlotKey`
-/// in `lib/domain/tracking.dart` for the exact shapes.
+/// Immutable snapshot of both build-status tracking sets.  Owned by
+/// [TrackingNotifier]; widgets watch [trackingProvider] and read
+/// `state.edited` / `state.shipped` directly.
 ///
-/// Runs `pruneOrphans` against the union of `customSlotsProvider` and
-/// `nrSlotsProvider` keys on load (Python parity with
-/// `_prune_orphan_tracking` at RR_VHS_Tool.py:7726-7759) and re-persists
-/// when anything was dropped.  Keeps stale entries from accumulating
-/// after slots are deleted externally or via the pre-Change-3 delete
-/// paths that didn't yet wire to the tracking sets.
-final editedSlotsProvider = FutureProvider<Set<String>>((ref) async {
-  final dir = ref.watch(workingDirProvider);
-  final ds = TrackingSetDataSource(
-      workingDir: dir, fileName: _kEditedSlotsFile);
-  final raw = await ds.load();
-  final genreSlots = await ref.watch(customSlotsProvider.future);
-  final nrs = await ref.watch(nrSlotsProvider.future);
-  final valid =
-      validTrackingKeys(genreSlotsByGenre: genreSlots, nrs: nrs);
-  final pruned = pruneOrphans(raw, valid);
-  if (pruned.dropped.isNotEmpty) {
-    await ds.save(pruned.pruned);
-  }
-  return pruned.pruned;
-});
+/// The shape is a value object rather than two separate AsyncValues
+/// because tracking is small (<1k strings total), fully in-memory, and
+/// mutated frequently (every edit).  Holding it as a sync state makes
+/// mutations instant — no AsyncLoading flicker on OTHER cards while one
+/// card is being marked edited.
+@immutable
+class TrackingState {
+  final Set<String> edited;
+  final Set<String> shipped;
+  const TrackingState({
+    this.edited = const <String>{},
+    this.shipped = const <String>{},
+  });
+}
 
-/// "Shipped in last build" tracking set, sourced from
-/// `shipped_slots.json`.  Same orphan-heal contract as
-/// [editedSlotsProvider].
-final shippedSlotsProvider = FutureProvider<Set<String>>((ref) async {
-  final dir = ref.watch(workingDirProvider);
-  final ds = TrackingSetDataSource(
-      workingDir: dir, fileName: _kShippedSlotsFile);
-  final raw = await ds.load();
-  final genreSlots = await ref.watch(customSlotsProvider.future);
-  final nrs = await ref.watch(nrSlotsProvider.future);
-  final valid =
-      validTrackingKeys(genreSlotsByGenre: genreSlots, nrs: nrs);
-  final pruned = pruneOrphans(raw, valid);
-  if (pruned.dropped.isNotEmpty) {
-    await ds.save(pruned.pruned);
-  }
-  return pruned.pruned;
-});
-
-/// Mutator for both tracking sets.  All other controllers call into
-/// this on relevant lifecycle events:
+/// In-memory tracking with async disk persistence.  Loads both files
+/// on construction; mutations apply synchronously to state and fire-
+/// and-forget the disk write.
 ///
-///   * `markEdited(key)` — on any edit (image/title/transform/etc.).
-///     Idempotent; only writes when the key isn't already present.
-///   * `removeKey(key)` — on slot delete; drops from **both** sets.
-///     Implements Change 3 from the v1.8.2.2 changelog
-///     (RR_VHS_Tool.py:10767-10773, 9902-9908).
-///   * `onBuildSuccess(currentKeys)` — clears edited and replaces
-///     shipped with the supplied set, matching Python's behaviour at
-///     RR_VHS_Tool.py:14879-14888 (success path of "Ship to Store").
+/// Lifecycle:
+///   1. Construct → emit empty `TrackingState`.
+///   2. `_init` reads `edited_slots.json` + `shipped_slots.json` and
+///      emits the loaded sets — happens within the first frame for a
+///      reasonably-sized library (the files are sorted JSON arrays).
+///   3. `_healOrphans` waits for slot providers, prunes stale keys,
+///      and re-emits + persists if anything was dropped.  Python parity
+///      with `_prune_orphan_tracking` (RR_VHS_Tool.py:7726-7759).
 ///
-/// All mutators invalidate the relevant FutureProviders so the UI
-/// rebuilds with fresh badges.
-class TrackingController {
+/// Mutators ([markEdited] / [markEditedForBkgTex] / [removeKey] /
+/// [onBuildSuccess]) emit a new state synchronously, then persist in
+/// the background.  No invalidate calls — widgets see the new state on
+/// the very next frame, with no intermediate "loading" pass.
+class TrackingNotifier extends StateNotifier<TrackingState> {
   final Ref _ref;
-  TrackingController(this._ref);
-
-  TrackingSetDataSource _editedDs() {
-    final dir = _ref.read(workingDirProvider);
-    return TrackingSetDataSource(
-        workingDir: dir, fileName: _kEditedSlotsFile);
+  TrackingNotifier(this._ref) : super(const TrackingState()) {
+    _init();
   }
 
-  TrackingSetDataSource _shippedDs() {
-    final dir = _ref.read(workingDirProvider);
-    return TrackingSetDataSource(
-        workingDir: dir, fileName: _kShippedSlotsFile);
+  TrackingSetDataSource _editedDs() => TrackingSetDataSource(
+        workingDir: _ref.read(workingDirProvider),
+        fileName: _kEditedSlotsFile,
+      );
+  TrackingSetDataSource _shippedDs() => TrackingSetDataSource(
+        workingDir: _ref.read(workingDirProvider),
+        fileName: _kShippedSlotsFile,
+      );
+
+  Future<void> _init() async {
+    final edited = await _editedDs().load();
+    final shipped = await _shippedDs().load();
+    if (!mounted) return;
+    state = TrackingState(edited: edited, shipped: shipped);
+    await _healOrphans();
+  }
+
+  Future<void> _healOrphans() async {
+    try {
+      final genreSlots = await _ref.read(customSlotsProvider.future);
+      final nrs = await _ref.read(nrSlotsProvider.future);
+      if (!mounted) return;
+      final valid =
+          validTrackingKeys(genreSlotsByGenre: genreSlots, nrs: nrs);
+      final eR = pruneOrphans(state.edited, valid);
+      final sR = pruneOrphans(state.shipped, valid);
+      if (eR.dropped.isEmpty && sR.dropped.isEmpty) return;
+      state = TrackingState(edited: eR.pruned, shipped: sR.pruned);
+      if (eR.dropped.isNotEmpty) {
+        if (eR.pruned.isEmpty) {
+          await _editedDs().delete();
+        } else {
+          await _editedDs().save(eR.pruned);
+        }
+      }
+      if (sR.dropped.isNotEmpty) await _shippedDs().save(sR.pruned);
+    } catch (_) {
+      // Tracking heal is non-fatal — if slot providers error out
+      // (corrupt JSON, etc.) we keep the pre-heal state so the user
+      // still sees their badges and can ship to recover.
+    }
   }
 
   Future<void> markEdited(String key) async {
-    final ds = _editedDs();
-    final current = await ds.load();
-    if (!current.add(key)) return; // no-op when already present
-    await ds.save(current);
-    _ref.invalidate(editedSlotsProvider);
+    if (state.edited.contains(key)) return;
+    final next = <String>{...state.edited, key};
+    state = TrackingState(edited: next, shipped: state.shipped);
+    await _editedDs().save(next);
   }
 
   /// Same as [markEdited] but takes a texture-name (bkgTex) and resolves
@@ -494,11 +503,6 @@ class TrackingController {
   ///     user later changing the NR's genre (bkgTex flips Drama → Horror
   ///     but SKU is invariant).  Falls back to bkgTex when no NR matches
   ///     — keeps the badge visible until the orphan pruner reconciles.
-  ///
-  /// Used by [ReplacementsController] which deals in bkgTex regardless
-  /// of slot type.  Genre / NR callers that already know the SKU should
-  /// call [markEdited] directly with the appropriate `genreSlotKey` /
-  /// `nrSlotKey` value.
   Future<void> markEditedForBkgTex(String bkgTex) async {
     if (bkgTex.startsWith('T_New_')) {
       final nrs = await _ref.read(nrSlotsProvider.future);
@@ -513,34 +517,34 @@ class TrackingController {
   }
 
   Future<void> removeKey(String key) async {
-    final edited = _editedDs();
-    final shipped = _shippedDs();
-    final eCur = await edited.load();
-    if (eCur.remove(key)) {
-      if (eCur.isEmpty) {
-        await edited.delete();
+    final hadEdit = state.edited.contains(key);
+    final hadShip = state.shipped.contains(key);
+    if (!hadEdit && !hadShip) return;
+    final newEdited =
+        hadEdit ? (<String>{...state.edited}..remove(key)) : state.edited;
+    final newShipped =
+        hadShip ? (<String>{...state.shipped}..remove(key)) : state.shipped;
+    state = TrackingState(edited: newEdited, shipped: newShipped);
+    if (hadEdit) {
+      if (newEdited.isEmpty) {
+        await _editedDs().delete();
       } else {
-        await edited.save(eCur);
+        await _editedDs().save(newEdited);
       }
-      _ref.invalidate(editedSlotsProvider);
     }
-    final sCur = await shipped.load();
-    if (sCur.remove(key)) {
-      await shipped.save(sCur);
-      _ref.invalidate(shippedSlotsProvider);
-    }
+    if (hadShip) await _shippedDs().save(newShipped);
   }
 
   Future<void> onBuildSuccess(Set<String> currentKeys) async {
+    state = TrackingState(edited: const <String>{}, shipped: currentKeys);
     await _editedDs().delete();
     await _shippedDs().save(currentKeys);
-    _ref.invalidate(editedSlotsProvider);
-    _ref.invalidate(shippedSlotsProvider);
   }
 }
 
-final trackingControllerProvider =
-    Provider<TrackingController>((ref) => TrackingController(ref));
+final trackingProvider =
+    StateNotifierProvider<TrackingNotifier, TrackingState>(
+        (ref) => TrackingNotifier(ref));
 
 /// Mutator for `nr_custom_slots.json`.  Same load → mutate → save →
 /// invalidate pattern as [SlotsController].  NR slots are uniquely
@@ -572,7 +576,7 @@ class NrSlotsController {
     _ref.invalidate(nrSlotsProvider);
     // New NR slots show the "Edited" badge until the next build.
     await _ref
-        .read(trackingControllerProvider)
+        .read(trackingProvider.notifier)
         .markEdited(nrSlotKey(newSlot));
     return result;
   }
@@ -597,7 +601,7 @@ class NrSlotsController {
     // Change 3: drop this NR's tracking from both edited and shipped so
     // a re-created NR doesn't inherit the deleted one's badge state.
     // Python parity at RR_VHS_Tool.py:9897-9908.
-    await _ref.read(trackingControllerProvider).removeKey('NR_$sku');
+    await _ref.read(trackingProvider.notifier).removeKey('NR_$sku');
   }
 
   /// Replace the slot identified by `updated.sku` in place.  No-op when
@@ -622,7 +626,7 @@ class NrSlotsController {
     await ds.save(next);
     _ref.invalidate(nrSlotsProvider);
     await _ref
-        .read(trackingControllerProvider)
+        .read(trackingProvider.notifier)
         .markEdited(nrSlotKey(updated));
   }
 }
@@ -859,7 +863,7 @@ class BuildController extends StateNotifier<BuildState> {
           final currentKeys = validTrackingKeys(
               genreSlotsByGenre: genreSlots, nrs: nrs);
           await _ref
-              .read(trackingControllerProvider)
+              .read(trackingProvider.notifier)
               .onBuildSuccess(currentKeys);
         } catch (_) {
           // Tracking is non-fatal — a snapshot failure must not erase
