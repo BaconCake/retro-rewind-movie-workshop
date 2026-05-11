@@ -13,6 +13,7 @@ import '../../domain/repositories/pak_builder.dart' show BuildProgress;
 import '../../domain/sku.dart';
 import '../providers/providers.dart';
 import 'rarity_picker.dart';
+import 'slot_status_badge.dart';
 import 'star_rating_picker.dart';
 
 /// Right-hand operations column.
@@ -37,13 +38,52 @@ class SlotOptionsPanel extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: const [
-          _SectionHeader('SLOT OPTIONS'),
+          _SlotOptionsHeader(),
           SizedBox(height: kSp2),
           Expanded(child: _SlotOptionsBody()),
           SizedBox(height: kSp3),
           _BuildSection(),
         ],
       ),
+    );
+  }
+}
+
+/// Header row above the slot edit form.  Shows the cyan "SLOT OPTIONS"
+/// label on the left and, when a slot is selected, its build-status
+/// badge on the right (same EDITED/UNSHIPPED semantics as the shelf
+/// cards — central place for the user to see status while editing).
+class _SlotOptionsHeader extends ConsumerWidget {
+  const _SlotOptionsHeader();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final selected = ref.watch(selectedSlotBkgProvider);
+    String? trackingKey;
+    if (selected != null) {
+      if (selected.startsWith(kNrSelectionPrefix)) {
+        final sku = selected.substring(kNrSelectionPrefix.length);
+        if (int.tryParse(sku) != null) trackingKey = 'NR_$sku';
+      } else {
+        trackingKey = selected; // genre slot key == bkgTex
+      }
+    }
+    final edited = ref
+        .watch(editedSlotsProvider)
+        .maybeWhen(data: (s) => s, orElse: () => const <String>{});
+    final shipped = ref
+        .watch(shippedSlotsProvider)
+        .maybeWhen(data: (s) => s, orElse: () => const <String>{});
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        const _SectionHeader('SLOT OPTIONS'),
+        if (trackingKey != null)
+          SlotStatusBadge(
+            isEdited: edited.contains(trackingKey),
+            isShipped: shipped.contains(trackingKey),
+          ),
+      ],
     );
   }
 }

@@ -9,6 +9,7 @@ import '../../data/datasources/custom_slots_data_source.dart';
 import '../../data/datasources/json_file_data_source.dart';
 import '../../data/datasources/nr_slots_data_source.dart';
 import '../../data/datasources/replacements_data_source.dart';
+import '../../data/datasources/tracking_set_data_source.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../data/repositories/config_repository_impl.dart';
 import '../../data/repositories/pak_builder_impl.dart';
@@ -23,6 +24,7 @@ import '../../domain/entities/texture.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../../domain/nr_slot_logic.dart';
 import '../../domain/replacements_migration.dart';
+import '../../domain/tracking.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
 import '../../domain/repositories/texture_repository.dart';
@@ -170,6 +172,7 @@ class ReplacementsController {
     );
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
+    await _ref.read(trackingControllerProvider).markEditedForBkgTex(bkgTex);
   }
 
   Future<void> removeImage(String bkgTex) async {
@@ -180,6 +183,7 @@ class ReplacementsController {
     final next = Map<String, TextureReplacement>.from(current)..remove(bkgTex);
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
+    await _ref.read(trackingControllerProvider).markEditedForBkgTex(bkgTex);
   }
 
   /// Update the (offsetX, offsetY, zoom) crop transform for an existing
@@ -205,6 +209,7 @@ class ReplacementsController {
     );
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
+    await _ref.read(trackingControllerProvider).markEditedForBkgTex(bkgTex);
   }
 }
 
@@ -243,6 +248,9 @@ class SlotsController {
 
     await ds.save(next);
     _ref.invalidate(customSlotsProvider);
+    await _ref
+        .read(trackingControllerProvider)
+        .markEdited(genreSlotKey(updated));
   }
 
   /// Append a new custom slot to [genre] with the given title + star/rarity
@@ -305,6 +313,9 @@ class SlotsController {
 
     await ds.save(next);
     _ref.invalidate(customSlotsProvider);
+    // A brand-new slot has by definition not been shipped yet, so it
+    // shows the "Edited since last build" badge until the next build.
+    await _ref.read(trackingControllerProvider).markEdited(bkgTex);
     return bkgTex;
   }
 
@@ -348,6 +359,10 @@ class SlotsController {
     }
 
     _ref.invalidate(customSlotsProvider);
+    // Change 3: drop this slot from both tracking sets so a deleted-
+    // then-rebuilt slot doesn't appear shipped against a key that no
+    // longer exists.  Python parity at RR_VHS_Tool.py:10767-10773.
+    await _ref.read(trackingControllerProvider).removeKey(bkgTex);
   }
 }
 
@@ -384,6 +399,149 @@ final nrSlotsProvider = FutureProvider<List<NewReleaseSlot>>((ref) async {
   return migrated.slots;
 });
 
+const _kEditedSlotsFile = 'edited_slots.json';
+const _kShippedSlotsFile = 'shipped_slots.json';
+
+/// "Edited since last build" tracking set, sourced from
+/// `edited_slots.json`.  Keys follow Python's wire format so the file
+/// is portable between the two tools — see `genreSlotKey` / `nrSlotKey`
+/// in `lib/domain/tracking.dart` for the exact shapes.
+///
+/// Runs `pruneOrphans` against the union of `customSlotsProvider` and
+/// `nrSlotsProvider` keys on load (Python parity with
+/// `_prune_orphan_tracking` at RR_VHS_Tool.py:7726-7759) and re-persists
+/// when anything was dropped.  Keeps stale entries from accumulating
+/// after slots are deleted externally or via the pre-Change-3 delete
+/// paths that didn't yet wire to the tracking sets.
+final editedSlotsProvider = FutureProvider<Set<String>>((ref) async {
+  final dir = ref.watch(workingDirProvider);
+  final ds = TrackingSetDataSource(
+      workingDir: dir, fileName: _kEditedSlotsFile);
+  final raw = await ds.load();
+  final genreSlots = await ref.watch(customSlotsProvider.future);
+  final nrs = await ref.watch(nrSlotsProvider.future);
+  final valid =
+      validTrackingKeys(genreSlotsByGenre: genreSlots, nrs: nrs);
+  final pruned = pruneOrphans(raw, valid);
+  if (pruned.dropped.isNotEmpty) {
+    await ds.save(pruned.pruned);
+  }
+  return pruned.pruned;
+});
+
+/// "Shipped in last build" tracking set, sourced from
+/// `shipped_slots.json`.  Same orphan-heal contract as
+/// [editedSlotsProvider].
+final shippedSlotsProvider = FutureProvider<Set<String>>((ref) async {
+  final dir = ref.watch(workingDirProvider);
+  final ds = TrackingSetDataSource(
+      workingDir: dir, fileName: _kShippedSlotsFile);
+  final raw = await ds.load();
+  final genreSlots = await ref.watch(customSlotsProvider.future);
+  final nrs = await ref.watch(nrSlotsProvider.future);
+  final valid =
+      validTrackingKeys(genreSlotsByGenre: genreSlots, nrs: nrs);
+  final pruned = pruneOrphans(raw, valid);
+  if (pruned.dropped.isNotEmpty) {
+    await ds.save(pruned.pruned);
+  }
+  return pruned.pruned;
+});
+
+/// Mutator for both tracking sets.  All other controllers call into
+/// this on relevant lifecycle events:
+///
+///   * `markEdited(key)` — on any edit (image/title/transform/etc.).
+///     Idempotent; only writes when the key isn't already present.
+///   * `removeKey(key)` — on slot delete; drops from **both** sets.
+///     Implements Change 3 from the v1.8.2.2 changelog
+///     (RR_VHS_Tool.py:10767-10773, 9902-9908).
+///   * `onBuildSuccess(currentKeys)` — clears edited and replaces
+///     shipped with the supplied set, matching Python's behaviour at
+///     RR_VHS_Tool.py:14879-14888 (success path of "Ship to Store").
+///
+/// All mutators invalidate the relevant FutureProviders so the UI
+/// rebuilds with fresh badges.
+class TrackingController {
+  final Ref _ref;
+  TrackingController(this._ref);
+
+  TrackingSetDataSource _editedDs() {
+    final dir = _ref.read(workingDirProvider);
+    return TrackingSetDataSource(
+        workingDir: dir, fileName: _kEditedSlotsFile);
+  }
+
+  TrackingSetDataSource _shippedDs() {
+    final dir = _ref.read(workingDirProvider);
+    return TrackingSetDataSource(
+        workingDir: dir, fileName: _kShippedSlotsFile);
+  }
+
+  Future<void> markEdited(String key) async {
+    final ds = _editedDs();
+    final current = await ds.load();
+    if (!current.add(key)) return; // no-op when already present
+    await ds.save(current);
+    _ref.invalidate(editedSlotsProvider);
+  }
+
+  /// Same as [markEdited] but takes a texture-name (bkgTex) and resolves
+  /// it to the right stable key:
+  ///
+  ///   * `T_Bkg_*` → bkgTex verbatim (genre slot key is bkgTex anyway).
+  ///   * `T_New_*` → look up the NR slot's SKU so the entry survives the
+  ///     user later changing the NR's genre (bkgTex flips Drama → Horror
+  ///     but SKU is invariant).  Falls back to bkgTex when no NR matches
+  ///     — keeps the badge visible until the orphan pruner reconciles.
+  ///
+  /// Used by [ReplacementsController] which deals in bkgTex regardless
+  /// of slot type.  Genre / NR callers that already know the SKU should
+  /// call [markEdited] directly with the appropriate `genreSlotKey` /
+  /// `nrSlotKey` value.
+  Future<void> markEditedForBkgTex(String bkgTex) async {
+    if (bkgTex.startsWith('T_New_')) {
+      final nrs = await _ref.read(nrSlotsProvider.future);
+      for (final n in nrs) {
+        if (n.bkgTex == bkgTex) {
+          await markEdited(nrSlotKey(n));
+          return;
+        }
+      }
+    }
+    await markEdited(bkgTex);
+  }
+
+  Future<void> removeKey(String key) async {
+    final edited = _editedDs();
+    final shipped = _shippedDs();
+    final eCur = await edited.load();
+    if (eCur.remove(key)) {
+      if (eCur.isEmpty) {
+        await edited.delete();
+      } else {
+        await edited.save(eCur);
+      }
+      _ref.invalidate(editedSlotsProvider);
+    }
+    final sCur = await shipped.load();
+    if (sCur.remove(key)) {
+      await shipped.save(sCur);
+      _ref.invalidate(shippedSlotsProvider);
+    }
+  }
+
+  Future<void> onBuildSuccess(Set<String> currentKeys) async {
+    await _editedDs().delete();
+    await _shippedDs().save(currentKeys);
+    _ref.invalidate(editedSlotsProvider);
+    _ref.invalidate(shippedSlotsProvider);
+  }
+}
+
+final trackingControllerProvider =
+    Provider<TrackingController>((ref) => TrackingController(ref));
+
 /// Mutator for `nr_custom_slots.json`.  Same load → mutate → save →
 /// invalidate pattern as [SlotsController].  NR slots are uniquely
 /// identified by SKU (titles can collide; tex_num + genre may share).
@@ -408,9 +566,14 @@ class NrSlotsController {
       standeeShape: standeeShape,
     );
     if (!result.isOk) return result;
-    final next = [...current, result.slot!];
+    final newSlot = result.slot!;
+    final next = [...current, newSlot];
     await ds.save(next);
     _ref.invalidate(nrSlotsProvider);
+    // New NR slots show the "Edited" badge until the next build.
+    await _ref
+        .read(trackingControllerProvider)
+        .markEdited(nrSlotKey(newSlot));
     return result;
   }
 
@@ -431,6 +594,10 @@ class NrSlotsController {
       _ref.read(selectedSlotBkgProvider.notifier).state = null;
     }
     _ref.invalidate(nrSlotsProvider);
+    // Change 3: drop this NR's tracking from both edited and shipped so
+    // a re-created NR doesn't inherit the deleted one's badge state.
+    // Python parity at RR_VHS_Tool.py:9897-9908.
+    await _ref.read(trackingControllerProvider).removeKey('NR_$sku');
   }
 
   /// Replace the slot identified by `updated.sku` in place.  No-op when
@@ -454,6 +621,9 @@ class NrSlotsController {
     if (!found) return;
     await ds.save(next);
     _ref.invalidate(nrSlotsProvider);
+    await _ref
+        .read(trackingControllerProvider)
+        .markEdited(nrSlotKey(updated));
   }
 }
 
@@ -674,6 +844,28 @@ class BuildController extends StateNotifier<BuildState> {
         lastBuildElapsedMs: sw.elapsedMilliseconds,
         clearProgress: true,
       );
+
+      // On a successful install: clear "edited" (this build shipped every
+      // pending change) and replace "shipped" with the current slot set
+      // (so any slots deleted since the last build vanish from the badge).
+      // Python parity at RR_VHS_Tool.py:14878-14888.
+      if (result.errorCode == null &&
+          result.installedPath != null &&
+          result.installedPath!.isNotEmpty) {
+        try {
+          final genreSlots =
+              await _ref.read(customSlotsProvider.future);
+          final nrs = await _ref.read(nrSlotsProvider.future);
+          final currentKeys = validTrackingKeys(
+              genreSlotsByGenre: genreSlots, nrs: nrs);
+          await _ref
+              .read(trackingControllerProvider)
+              .onBuildSuccess(currentKeys);
+        } catch (_) {
+          // Tracking is non-fatal — a snapshot failure must not erase
+          // the user's just-completed build outcome from the UI.
+        }
+      }
     } finally {
       await _logSink?.flush();
       await _logSink?.close();

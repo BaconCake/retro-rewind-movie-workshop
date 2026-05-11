@@ -23,6 +23,13 @@ const Color kColorPink = Color(0xFFFF0055); // edit · custom · error · upload
 const Color kColorGold = Color(0xFFFFD84A); // rarity · highlights · stars
 const Color kColorDisabled = Color(0xFF5A5A5A); // disabled controls
 
+// ── Build-status badges (Python RR_VHS_Tool.py:11447-11458) ──────────
+// Three-state model: UNSHIPPED (never built) > EDITED (built, then
+// changed) > none (built and clean).  Same hex values as Python so the
+// two tools' shelves render side-by-side identically.
+const Color kColorBadgeUnshipped = Color(0xFF8B3333); // dark red
+const Color kColorBadgeEdited = Color(0xFFF5A623); // amber
+
 // ── Text ──────────────────────────────────────────────────────────────
 const Color kColorText = Color(0xFFF2F5F7); // primary
 const Color kColorText2 = Color(0xFFA8B0B8); // secondary

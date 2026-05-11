@@ -12,6 +12,7 @@ import '../providers/providers.dart';
 import 'add_nr_slot_dialog.dart';
 import 'add_slot_dialog.dart';
 import 'cover_image.dart';
+import 'slot_status_badge.dart';
 
 /// Shelf of custom slot cards for the active tab (left column of the
 /// 3-column main layout — mirrors Python's "shelf" panel
@@ -31,13 +32,22 @@ class TextureGrid extends ConsumerWidget {
 
     if (tab == 'New Releases') {
       final nrAsync = ref.watch(nrSlotsProvider);
+      final edited = ref
+          .watch(editedSlotsProvider)
+          .maybeWhen(data: (s) => s, orElse: () => const <String>{});
+      final shipped = ref
+          .watch(shippedSlotsProvider)
+          .maybeWhen(data: (s) => s, orElse: () => const <String>{});
       return nrAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, st) => _ErrorBanner(message: '$e'),
-        data: (slots) => _NrSlotGrid(slots: slots),
+        data: (slots) =>
+            _NrSlotGrid(slots: slots, edited: edited, shipped: shipped),
       );
     }
 
+    final edited = ref.watch(editedSlotsProvider);
+    final shipped = ref.watch(shippedSlotsProvider);
     return customSlots.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, st) => _ErrorBanner(message: '$e'),
@@ -47,6 +57,11 @@ class TextureGrid extends ConsumerWidget {
         data: (replMap) => _SlotGrid(
           slots: _slotsForTab(tab, slotsByDt),
           replacements: replMap,
+          // Status sets are optional — when tracking hasn't loaded yet
+          // (or errored) we just skip the badges; missing badges are
+          // strictly better UX than a flicker or an exception banner.
+          edited: edited.maybeWhen(data: (s) => s, orElse: () => const <String>{}),
+          shipped: shipped.maybeWhen(data: (s) => s, orElse: () => const <String>{}),
         ),
       ),
     );
@@ -74,8 +89,15 @@ class TextureGrid extends ConsumerWidget {
 class _SlotGrid extends ConsumerWidget {
   final List<SlotData> slots;
   final Map<String, TextureReplacement> replacements;
+  final Set<String> edited;
+  final Set<String> shipped;
 
-  const _SlotGrid({required this.slots, required this.replacements});
+  const _SlotGrid({
+    required this.slots,
+    required this.replacements,
+    required this.edited,
+    required this.shipped,
+  });
 
   /// Pre-fill genre for the Add dialog. Null when on "All Movies"
   /// (the dialog falls back to its own picker).
@@ -120,6 +142,8 @@ class _SlotGrid extends ConsumerWidget {
           slot: slot,
           replacement: replacements[slot.bkgTex],
           selected: slot.bkgTex == selectedBkg,
+          isEdited: edited.contains(slot.bkgTex),
+          isShipped: shipped.contains(slot.bkgTex),
           onTap: () =>
               ref.read(selectedSlotBkgProvider.notifier).state = slot.bkgTex,
         );
@@ -229,12 +253,16 @@ class _SlotCard extends StatelessWidget {
   final SlotData slot;
   final TextureReplacement? replacement;
   final bool selected;
+  final bool isEdited;
+  final bool isShipped;
   final VoidCallback onTap;
 
   const _SlotCard({
     required this.slot,
     required this.selected,
     required this.onTap,
+    required this.isEdited,
+    required this.isShipped,
     this.replacement,
   });
 
@@ -263,9 +291,32 @@ class _SlotCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: _Thumbnail(
-                replacement: replacement,
-                layout: slot.ls,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: _Thumbnail(
+                      replacement: replacement,
+                      layout: slot.ls,
+                    ),
+                  ),
+                  // Status badge floats in the upper-right.  Wrapped in a
+                  // tiny dark plate so the amber/red text stays readable
+                  // over both bright covers and the dim placeholder bg.
+                  if (isEdited || !isShipped)
+                    Positioned(
+                      top: kSp1,
+                      right: kSp1,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 1),
+                        color: kColorBg.withValues(alpha: 0.78),
+                        child: SlotStatusBadge(
+                          isEdited: isEdited,
+                          isShipped: isShipped,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
             Container(
@@ -473,7 +524,13 @@ class _Placeholder extends StatelessWidget {
 /// information-dense per pixel.
 class _NrSlotGrid extends ConsumerWidget {
   final List<NewReleaseSlot> slots;
-  const _NrSlotGrid({required this.slots});
+  final Set<String> edited;
+  final Set<String> shipped;
+  const _NrSlotGrid({
+    required this.slots,
+    required this.edited,
+    required this.shipped,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -488,9 +545,12 @@ class _NrSlotGrid extends ConsumerWidget {
         }
         final slot = slots[i - 1];
         final selKey = '$kNrSelectionPrefix${slot.sku}';
+        final trackingKey = 'NR_${slot.sku}';
         return _NrSlotRow(
           slot: slot,
           selected: selKey == selectedBkg,
+          isEdited: edited.contains(trackingKey),
+          isShipped: shipped.contains(trackingKey),
           onTap: () =>
               ref.read(selectedSlotBkgProvider.notifier).state = selKey,
         );
@@ -551,11 +611,15 @@ class _AddNrRow extends StatelessWidget {
 class _NrSlotRow extends StatefulWidget {
   final NewReleaseSlot slot;
   final bool selected;
+  final bool isEdited;
+  final bool isShipped;
   final VoidCallback onTap;
 
   const _NrSlotRow({
     required this.slot,
     required this.selected,
+    required this.isEdited,
+    required this.isShipped,
     required this.onTap,
   });
 
@@ -633,6 +697,13 @@ class _NrSlotRowState extends State<_NrSlotRow> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              if (widget.isEdited || !widget.isShipped) ...[
+                const SizedBox(width: kSp2),
+                SlotStatusBadge(
+                  isEdited: widget.isEdited,
+                  isShipped: widget.isShipped,
+                ),
+              ],
             ],
           ),
         ),
