@@ -171,7 +171,9 @@ void main() {
     });
   });
 
-  test('uasset is copied byte-for-byte from the base file', () {
+  test('uasset is copied byte-for-byte when input has no valid structure', () {
+    // Random bytes don't parse as a uasset (pkgLen at 0x20 reads as garbage,
+    // bounds check trips and the SerialSize patch is a no-op).
     final base = Uint8List.fromList(List.generate(500, (i) => i & 0xFF));
     final a = TextureInjectorImpl.composeArtifacts(
       ddsBytes: _fakeDds(
@@ -180,5 +182,130 @@ void main() {
       baseUasset: base,
     );
     expect(a.uasset, base);
+  });
+
+  group('composeArtifacts — SerialSize patch (fat-donor bug fix)', () {
+    /// Build a minimal synthetic uasset with the export-entry layout the
+    /// patch reads:
+    ///   0x00..0x1F : 32 bytes header (zeros)
+    ///   0x20       : i32 pkgLen
+    ///   0x24..     : PackageName bytes (length pkgLen)
+    ///   fse        : 0x24 + pkgLen
+    ///   fse+32     : i32 exportOff
+    ///   exportOff+28 : i64 SerialSize  ← patched to uexp.length - 4
+    Uint8List _syntheticUasset({
+      required int initialSerialSize,
+      int pkgLen = 10,
+      int totalLen = 260,
+    }) {
+      final out = Uint8List(totalLen);
+      final bd = ByteData.sublistView(out);
+      bd.setInt32(0x20, pkgLen, Endian.little);
+      final fse = 0x24 + pkgLen;
+      const exportOff = 200;
+      bd.setInt32(fse + 32, exportOff, Endian.little);
+      bd.setInt64(exportOff + 28, initialSerialSize, Endian.little);
+      return out;
+    }
+
+    int _serialSizeOf(Uint8List uasset, {int pkgLen = 10}) {
+      final bd = ByteData.sublistView(uasset);
+      final fse = 0x24 + pkgLen;
+      final exportOff = bd.getInt32(fse + 32, Endian.little);
+      return bd.getInt64(exportOff + 28, Endian.little);
+    }
+
+    test('fat-donor SerialSize (3082) is overwritten with uexp.length - 4',
+        () {
+      // Reproduces the Act_08 / Act_10 crash: donor uasset claims a 3082-B
+      // export, but composeArtifacts ships the 1702-B template uexp.
+      // Without the patch, UE5 over-reads → ACCESS_VIOLATION.
+      final base = _syntheticUasset(initialSerialSize: 3082);
+      final templateUexp = Uint8List.fromList(kTBkgUexpTemplate);
+      expect(templateUexp.length, 1702,
+          reason: 'sanity: template is the canonical 1702-byte size');
+
+      final a = TextureInjectorImpl.composeArtifacts(
+        ddsBytes: _fakeDds(
+            headerSize: 128, pixelBytes: _patternPixels(kTNewUbulkSize)),
+        baseUexp: templateUexp,
+        baseUasset: base,
+      );
+
+      expect(_serialSizeOf(a.uasset), 1698,
+          reason: 'SerialSize must equal uexp.length - 4 (template = 1702)');
+    });
+
+    test('normal SerialSize (1698) survives patch unchanged (idempotent)', () {
+      final base = _syntheticUasset(initialSerialSize: 1698);
+      final a = TextureInjectorImpl.composeArtifacts(
+        ddsBytes: _fakeDds(
+            headerSize: 128, pixelBytes: _patternPixels(kTNewUbulkSize)),
+        baseUexp: Uint8List.fromList(kTBkgUexpTemplate),
+        baseUasset: base,
+      );
+      expect(_serialSizeOf(a.uasset), 1698);
+    });
+
+    test('SerialSize is recomputed from shipped uexp size, not the template',
+        () {
+      // When the uexp is NOT the 1702 template (existing base-game slot),
+      // the patch should reflect that file's actual size — not silently
+      // assume 1698.
+      final base = _syntheticUasset(initialSerialSize: 3082);
+      final largeUexp = Uint8List(8888);
+
+      final a = TextureInjectorImpl.composeArtifacts(
+        ddsBytes: _fakeDds(
+            headerSize: 128, pixelBytes: _patternPixels(kTNewUbulkSize)),
+        baseUexp: largeUexp,
+        baseUasset: base,
+      );
+
+      expect(_serialSizeOf(a.uasset), 8888 - 4,
+          reason: 'patch must always equal uexp.length - 4, regardless of '
+              'donor SerialSize or uexp shape — this is what makes the fix '
+              'future-proof against unknown fat donors.');
+    });
+
+    test('invariant: SerialSize always equals uexp.length - 4 post-compose',
+        () {
+      // Sweep a few representative SerialSize / uexp-length combinations.
+      const cases = <(int, int)>[
+        (1698, 1702),   // canonical template
+        (3082, 1702),   // Act fat-donor bug case
+        (1698, 8888),   // existing base-game uexp
+        (3082, 3086),   // ship the matching fat uexp (theoretical)
+      ];
+      for (final (donorSerial, uexpLen) in cases) {
+        final base = _syntheticUasset(initialSerialSize: donorSerial);
+        final a = TextureInjectorImpl.composeArtifacts(
+          ddsBytes: _fakeDds(
+              headerSize: 128, pixelBytes: _patternPixels(kTNewUbulkSize)),
+          baseUexp: Uint8List(uexpLen),
+          baseUasset: base,
+        );
+        expect(_serialSizeOf(a.uasset), uexpLen - 4,
+            reason: 'donor=$donorSerial, uexp=$uexpLen — '
+                'invariant SerialSize == uexp.length - 4 must hold');
+      }
+    });
+
+    test('garbage uasset that does not parse is passed through unchanged', () {
+      // pkgLen at 0x20 is a huge int that puts fse out of bounds — the
+      // patch's bounds checks should make this a safe no-op.
+      final base = Uint8List(64);
+      ByteData.sublistView(base).setInt32(0x20, 0x7FFFFFFF, Endian.little);
+      final originalCopy = Uint8List.fromList(base);
+
+      final a = TextureInjectorImpl.composeArtifacts(
+        ddsBytes: _fakeDds(
+            headerSize: 128, pixelBytes: _patternPixels(kTNewUbulkSize)),
+        baseUexp: Uint8List(2000),
+        baseUasset: base,
+      );
+
+      expect(a.uasset, originalCopy);
+    });
   });
 }

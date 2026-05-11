@@ -281,7 +281,9 @@ class TextureInjectorImpl implements TextureInjector {
   ///   mip pixel data with mips 5-11 from the DDS.  Otherwise leave the base
   ///   uexp untouched (existing base-game slots ship a much larger uexp and
   ///   Python preserves it).
-  /// - uasset is copied verbatim.
+  /// - uasset is copied from baseUasset, then the export-table SerialSize is
+  ///   patched to `uexp.length - 4` so it always matches the uexp we ship
+  ///   (see [_patchExportSerialSize]).
   static InjectionArtifacts composeArtifacts({
     required Uint8List ddsBytes,
     required Uint8List baseUexp,
@@ -315,11 +317,51 @@ class TextureInjectorImpl implements TextureInjector {
       uexp = Uint8List.fromList(baseUexp);
     }
 
+    final uasset = Uint8List.fromList(baseUasset);
+    _patchExportSerialSize(uasset: uasset, uexpLen: uexp.length);
+
     return InjectionArtifacts(
-      uasset: Uint8List.fromList(baseUasset),
+      uasset: uasset,
       uexp: uexp,
       ubulk: ubulk,
     );
+  }
+
+  /// Patch the Texture2D export entry's SerialSize so it equals
+  /// `uexpLen - 4` (the uexp's trailing 4-byte tag is not part of the
+  /// export payload).  No-op for inputs that don't look like a valid
+  /// uasset — bounds are checked at every step so the function is safe
+  /// to call on arbitrary [Uint8List]s (test fixtures, edge cases).
+  ///
+  /// Why this is needed: when [cloneTexture3digit] walks back to find a
+  /// donor, the donor's SerialSize is preserved verbatim in the cloned
+  /// uasset.  Base game has "fat" donors — e.g. `T_Bkg_Act_08.uexp` and
+  /// `T_Bkg_Act_10.uexp` are 3086 B (SerialSize=3082) instead of the
+  /// usual 1702 B (SerialSize=1698).  Without this patch, the cloned
+  /// uasset for slots 009 / 011 carries SerialSize=3082 while we ship a
+  /// 1702-byte template uexp; UE5 then reads `SerialSize` bytes starting
+  /// at `SerialOffset`, over-reads the uexp by 1384 bytes, and crashes
+  /// with `EXCEPTION_ACCESS_VIOLATION` in `FAsyncLoadingThread`.
+  ///
+  /// Recomputing from the actual shipped uexp size makes the workshop
+  /// future-proof: any donor, any genre, and any future base-pak shape
+  /// is automatically handled — no hardcoded slot list, no per-genre
+  /// special case.
+  static void _patchExportSerialSize({
+    required Uint8List uasset,
+    required int uexpLen,
+  }) {
+    if (uasset.length < 0x24 + 4) return;
+    final bd = ByteData.sublistView(uasset);
+    final pkgLen = bd.getInt32(0x20, Endian.little);
+    if (pkgLen <= 0) return;
+    final fse = 0x24 + pkgLen;
+    if (fse + 36 > uasset.length) return;
+    final exportOff = bd.getInt32(fse + 32, Endian.little);
+    // export entry layout: stored_number@+20, SerialSize@+28 (i64),
+    // SerialOffset@+36 (i64) — we need 8 bytes available at +28.
+    if (exportOff <= 0 || exportOff + 36 > uasset.length) return;
+    bd.setInt64(exportOff + 28, uexpLen - 4, Endian.little);
   }
 
   /// DDS header size: 128 for the standard DDS_HEADER, or 148 when the file
@@ -418,6 +460,20 @@ class TextureInjectorImpl implements TextureInjector {
     // checks the first iteration when dstSlotNum-1 is already in the base
     // game range (`if cand_num <= base_count_fb: break`), so we mirror that
     // tiny optimisation.
+    //
+    // Fat-donor skip: candidates whose uexp != 1702 B are "fat" — they
+    // ship a higher-resolution texture (2048×4096 typical) and their
+    // uasset carries mip metadata sized for that, embedded in dozens of
+    // fields the cloner doesn't patch (mip width/height/size/offsets in
+    // the FStreamableMipsData arrays).  After we clone such a uasset and
+    // pair it with our 1702-B template uexp, UE5 reads mip sizes that
+    // overshoot the uexp by ~1.4 KB and crashes in `FAsyncLoadingThread`
+    // with EXCEPTION_ACCESS_VIOLATION.  Known fat donors today:
+    //   * Action: T_Bkg_Act_08, T_Bkg_Act_10  (3086 B uexp each)
+    //   * Comedy: T_Bkg_Com_02, T_Bkg_Com_03  (~1 MB uexp each)
+    // Filtering by uexp size is future-proof: any base-pak update that
+    // introduces new fat slots is handled automatically — no hardcoded
+    // slot list to maintain.
     final genre = kGenres.firstWhere(
       (g) => g.code == genreCode,
       orElse: () => throw StateError('Unknown genre code "$genreCode"'),
@@ -430,6 +486,12 @@ class TextureInjectorImpl implements TextureInjector {
           : '${_textureNameStem(textureName)}_$candNum';
       final candFile = File(p.join(baseDir, '$candName.uasset'));
       if (await candFile.exists()) {
+        if (!await _isCleanDonor(baseDir, candName)) {
+          // Fat donor — keep walking back to find a clean one.  Don't
+          // hit the `candNum <= baseCount` break either; even within
+          // base range a fat slot must be skipped.
+          continue;
+        }
         final src = await candFile.readAsBytes();
         return cloneTexture3digit(
           srcData: src,
@@ -442,24 +504,24 @@ class TextureInjectorImpl implements TextureInjector {
       if (candNum <= baseCount) break;
     }
 
-    // Fallback: clone from the genre's last base slot — same genre, no
-    // cross-genre patch yet.  Only fires for T_Bkg or for T_New genres with
-    // newCount > 0.
-    if (baseCount > 0) {
-      final lastBaseName = isNewRelease
-          ? '${_textureNameStem(textureName)}_${baseCount.toString().padLeft(2, '0')}'
-          : '${_textureNameStem(textureName)}_${baseCount.toString().padLeft(2, '0')}';
-      final lastBaseFile = File(p.join(baseDir, '$lastBaseName.uasset'));
-      if (await lastBaseFile.exists()) {
-        final src = await lastBaseFile.readAsBytes();
-        return cloneTexture3digit(
-          srcData: src,
-          srcCode: genreCode,
-          srcNum: baseCount,
-          dstCode: genreCode,
-          dstNum: dstSlotNum,
-        );
-      }
+    // Fallback: clone from the genre's last clean base slot.  Walk back
+    // from baseCount until we hit a non-fat candidate — same rationale as
+    // the main loop above (see fat-donor comment).  Only fires for T_Bkg
+    // or for T_New genres with newCount > 0.
+    for (var fbNum = baseCount; fbNum > 0; fbNum--) {
+      final fbName =
+          '${_textureNameStem(textureName)}_${fbNum.toString().padLeft(2, '0')}';
+      final fbFile = File(p.join(baseDir, '$fbName.uasset'));
+      if (!await fbFile.exists()) continue;
+      if (!await _isCleanDonor(baseDir, fbName)) continue;
+      final src = await fbFile.readAsBytes();
+      return cloneTexture3digit(
+        srcData: src,
+        srcCode: genreCode,
+        srcNum: fbNum,
+        dstCode: genreCode,
+        dstNum: dstSlotNum,
+      );
     }
 
     // Cross-genre fallback for T_New on newCount==0 genres (Romance/Western):
@@ -519,6 +581,20 @@ class TextureInjectorImpl implements TextureInjector {
     }
 
     return kTBkgUexpTemplate;
+  }
+
+  /// True when the base candidate `<baseDir>/<candName>.uexp` is a "clean"
+  /// donor — i.e. has the canonical 1702-byte uexp size.  Used by the
+  /// cloner walk-back to skip fat donors that would corrupt the cloned
+  /// uasset's mip metadata (see `_resolveUasset` for the full rationale).
+  ///
+  /// Returns true if the uexp is missing entirely (lets the walk make
+  /// progress in degraded scenarios — the cloner step will surface any
+  /// real problem with its own error).
+  static Future<bool> _isCleanDonor(String baseDir, String candName) async {
+    final ueFile = File(p.join(baseDir, '$candName.uexp'));
+    if (!await ueFile.exists()) return true;
+    return (await ueFile.stat()).size == _kTBkgUexpTemplateSize;
   }
 
   /// For T_New on a genre with `newCount==0`, extract Horror's `T_Bkg_Hor`
