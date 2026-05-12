@@ -217,5 +217,51 @@ void main() {
       expect(await container.read(nrSlotsProvider.future), isEmpty);
       expect(await container.read(replacementsProvider.future), isEmpty);
     });
+
+    test('wipes .pasted_covers/ directory', () async {
+      await CustomSlotsDataSource(tmp.path).save({
+        'Drama': [
+          const SlotData(
+            bkgTex: 'T_Bkg_Dra_001',
+            pnName: 'x',
+            ls: 0,
+            lsc: 4,
+            sku: 1,
+          ),
+        ],
+      });
+      // Seed the clipboard-paste staging dir with a fake PNG.
+      final pastedDir = Directory(p.join(tmp.path, '.pasted_covers'));
+      await pastedDir.create();
+      await File(p.join(pastedDir.path, 'fake.png'))
+          .writeAsBytes([0x89, 0x50, 0x4E, 0x47]);
+      expect(pastedDir.existsSync(), isTrue);
+
+      await container.read(clearAllControllerProvider).call();
+
+      expect(pastedDir.existsSync(), isFalse);
+    });
+
+    test('missing .pasted_covers/ directory is not an error', () async {
+      // Common case: user never used Ctrl+V, so the dir was never created.
+      // The clear must still succeed end-to-end.
+      await CustomSlotsDataSource(tmp.path).save({
+        'Drama': [
+          const SlotData(
+            bkgTex: 'T_Bkg_Dra_001',
+            pnName: 'x',
+            ls: 0,
+            lsc: 4,
+            sku: 1,
+          ),
+        ],
+      });
+      expect(Directory(p.join(tmp.path, '.pasted_covers')).existsSync(),
+          isFalse);
+
+      final removed =
+          await container.read(clearAllControllerProvider).call();
+      expect(removed, 1);
+    });
   });
 }

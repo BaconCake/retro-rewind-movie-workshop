@@ -457,6 +457,20 @@ class ClearAllController {
     await _ref.read(trackingProvider.notifier).clearAll();
     _ref.read(selectedSlotBkgProvider.notifier).state = null;
 
+    // Wipe the clipboard-paste staging directory.  Every PNG in here was
+    // written for a slot that no longer exists, so leaving them on disk
+    // is pure litter (and the directory only grows over time — there's
+    // no per-paste cleanup).  Best-effort: a permission failure or
+    // already-missing directory must not abort the rest of the clear.
+    try {
+      final pastedDir = Directory(p.join(dir, '.pasted_covers'));
+      if (await pastedDir.exists()) {
+        await pastedDir.delete(recursive: true);
+      }
+    } catch (_) {
+      // Next paste will recreate the directory; non-fatal.
+    }
+
     _ref.invalidate(customSlotsProvider);
     _ref.invalidate(nrSlotsProvider);
     _ref.invalidate(replacementsProvider);
