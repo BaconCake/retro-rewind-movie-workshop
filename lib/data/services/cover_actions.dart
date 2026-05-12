@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
@@ -37,15 +38,53 @@ Future<void> rotateCoverImageCw(String path) async {
   await File(path).writeAsBytes(encoded);
 }
 
-/// Read the pixel dimensions of an image file without decoding the full
-/// pixel buffer when possible.  Returns null if the file can't be read.
+/// Read the pixel dimensions of an image file via header-only decode —
+/// never touches the pixel buffer.  Returns null if the file is missing,
+/// truncated, or in an unsupported format.
+///
+/// Performance: shelf thumbnails read dims for every visible card on
+/// every tab switch.  The naive `decodeImage(bytes)` path did a full
+/// RGB decode of multi-megabyte covers (≈500 ms per file on typical
+/// 4 K source images), which serialized into the 1 s freeze the user
+/// reported on tab switch.  This version:
+///
+///   * reads at most the first 64 KB of the file — enough for the
+///     header of every format `package:image` supports (PNG IHDR is
+///     in the first 24 bytes, JPEG SOF0 is in the first few KB),
+///   * calls `findDecoderForData` + `startDecode` which read width /
+///     height from the header without producing a pixel buffer.
+///
+/// Falls back to the full file (still header-only decode) when the
+/// chunked path returns null — a defensive belt-and-braces for
+/// unusual formats whose headers straddle the 64 KB boundary.
 Future<({int width, int height})?> readImageDimensions(String path) async {
   final file = File(path);
-  if (!file.existsSync()) return null;
+  if (!await file.exists()) return null;
+
+  Future<({int width, int height})?> tryDecode(Uint8List bytes) async {
+    final decoder = img.findDecoderForData(bytes);
+    if (decoder == null) return null;
+    final info = decoder.startDecode(bytes);
+    if (info == null) return null;
+    return (width: info.width, height: info.height);
+  }
+
+  RandomAccessFile? raf;
+  try {
+    raf = await file.open();
+    final len = await raf.length();
+    final chunkLen = len < 65536 ? len : 65536;
+    final chunk = await raf.read(chunkLen);
+    final fromChunk = await tryDecode(chunk);
+    if (fromChunk != null) return fromChunk;
+    if (chunkLen >= len) return null; // already read the whole file
+  } finally {
+    await raf?.close();
+  }
+  // Fallback: full-file header probe.  Still header-only decode, just
+  // covering the rare case where the header sits past 64 KB.
   final bytes = await file.readAsBytes();
-  final decoded = img.decodeImage(bytes);
-  if (decoded == null) return null;
-  return (width: decoded.width, height: decoded.height);
+  return tryDecode(bytes);
 }
 
 /// Layout-aware "Fit Visible": scale the image so it covers the selected

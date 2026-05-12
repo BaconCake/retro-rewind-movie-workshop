@@ -163,14 +163,21 @@ class _SlotGrid extends ConsumerWidget {
           );
         }
         final slot = slots[i];
-        return _SlotCard(
-          slot: slot,
-          replacement: replacements[slot.bkgTex],
-          selected: slot.bkgTex == selectedBkg,
-          isEdited: edited.contains(slot.bkgTex),
-          isShipped: shipped.contains(slot.bkgTex),
-          onTap: () =>
-              ref.read(selectedSlotBkgProvider.notifier).state = slot.bkgTex,
+        // RepaintBoundary keeps each card's paint layer separate, so
+        // scrolling / selecting one card doesn't invalidate the others'
+        // (decoded) raster.  Without this the GridView repaints all
+        // visible cards on every selection / scroll tick — the source
+        // of the stutter while thumbnails finish decoding.
+        return RepaintBoundary(
+          child: _SlotCard(
+            slot: slot,
+            replacement: replacements[slot.bkgTex],
+            selected: slot.bkgTex == selectedBkg,
+            isEdited: edited.contains(slot.bkgTex),
+            isShipped: shipped.contains(slot.bkgTex),
+            onTap: () => ref.read(selectedSlotBkgProvider.notifier).state =
+                slot.bkgTex,
+          ),
         );
       },
     );
@@ -412,20 +419,15 @@ class _Thumbnail extends ConsumerWidget {
         sublabel: 'will render black in-game',
       );
     } else {
-      final file = File(r.path);
-      if (!file.existsSync()) {
-        body = _Placeholder(
-          label: 'IMAGE MISSING',
-          sublabel: r.path,
-          isError: true,
-        );
-      } else {
-        body = _ThumbnailImage(
-          file: file,
-          replacement: r,
-          viewport: visRect,
-        );
-      }
+      // `existsSync()` used to live here — one syscall per card per
+      // rebuild was wasted work, since `_ThumbnailImage` already shows
+      // the "IMAGE MISSING" placeholder when `imageDimensionsProvider`
+      // resolves to null (which it does for missing files).
+      body = _ThumbnailImage(
+        file: File(r.path),
+        replacement: r,
+        viewport: visRect,
+      );
     }
     return Center(
       child: AspectRatio(aspectRatio: visAspect, child: body),
@@ -479,6 +481,9 @@ class _ThumbnailImage extends ConsumerWidget {
               // plenty.  Drops decode pixel count by ~7× vs. the cropper's
               // 4× headroom (4²/1.5² ≈ 7).
               cacheWidthMultiplier: 1.5,
+              // Visible feedback while the cover is decoding — critical
+              // on tab switches to a shelf full of fresh thumbnails.
+              showDecodeProgress: true,
             );
           },
         );

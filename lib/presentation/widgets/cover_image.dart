@@ -50,6 +50,13 @@ Widget buildCoverImageStack({
   // multiplier costs that-squared in decode time and pixel memory).
   // Callers that don't need zoom-headroom should pass 1.5.
   double cacheWidthMultiplier = 4.0,
+  /// When true, paint a small spinner centred over the canvas until
+  /// the first frame of the file has been decoded.  Thumbnails enable
+  /// this; the cropper leaves it off because its parent already shows
+  /// a "LOADING" placeholder while dimensions are read and the image
+  /// area would otherwise flash a spinner for a few milliseconds on
+  /// every selection change.
+  bool showDecodeProgress = false,
 }) {
   final v = viewport ??
       Rect.fromLTWH(
@@ -78,6 +85,42 @@ Widget buildCoverImageStack({
   final dispW = imgCanvasW * scale;
   final dispH = imgCanvasH * scale;
 
+  final image = Image.file(
+    file,
+    key: ValueKey('${file.path}|$imageGeneration'),
+    fit: BoxFit.fill,
+    cacheWidth:
+        (size.width * cacheWidthMultiplier).clamp(256, 4096).round(),
+    // Default Flutter frame builder already fades the first frame in
+    // gradually (`gaplessPlayback`-style).  We wrap it only when the
+    // caller asked for an explicit progress indicator on top.
+    frameBuilder: showDecodeProgress
+        ? (context, child, frame, wasSync) {
+            // `wasSync == true` means the image was already in cache and
+            // painted synchronously — no indicator needed.  Otherwise
+            // show the indicator until the first frame lands.
+            if (wasSync || frame != null) return child;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                child, // first paint goes through this slot
+                const Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(kColorText3),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+        : null,
+  );
+
   return ClipRect(
     child: Stack(
       fit: StackFit.expand,
@@ -88,14 +131,7 @@ Widget buildCoverImageStack({
           top: dispTop,
           width: dispW,
           height: dispH,
-          child: Image.file(
-            file,
-            key: ValueKey('${file.path}|$imageGeneration'),
-            fit: BoxFit.fill,
-            cacheWidth: (size.width * cacheWidthMultiplier)
-                .clamp(256, 4096)
-                .round(),
-          ),
+          child: image,
         ),
         // Caller-owned overlay layer.  We don't wrap it in IgnorePointer
         // so callers can mix interactive widgets (e.g. the cropper's "?"
