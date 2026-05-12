@@ -165,7 +165,9 @@ void main() {
   });
 
   group('addNrSlot — slot fields', () {
-    test('createdAt is set to injected `now`', () {
+    test('createdAt is set to injected `now`, formatted per nowIso', () {
+      // Matches the Python `_now_iso()` format: second-precision, no
+      // microseconds, no tz suffix.  See `lib/domain/timestamps.dart`.
       final ts = DateTime.utc(2026, 5, 7, 12, 0, 0);
       final r = addNrSlot(
         genre: 'Drama',
@@ -173,7 +175,7 @@ void main() {
         now: ts,
         random: Random(0),
       );
-      expect(r.slot!.createdAt, ts.toIso8601String());
+      expect(r.slot!.createdAt, '2026-05-07T12:00:00');
     });
 
     test('lastEditedAt is null on creation', () {

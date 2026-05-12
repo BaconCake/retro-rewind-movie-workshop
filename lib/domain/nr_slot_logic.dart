@@ -8,6 +8,7 @@ import 'dart:math';
 import '../core/constants/genres.dart';
 import '../core/constants/new_release.dart';
 import 'entities/new_release_slot.dart';
+import 'timestamps.dart';
 
 /// Result of [addNrSlot]: either the newly-created slot, or a reason it
 /// couldn't be added.  We return a tagged result instead of returning null
@@ -96,7 +97,7 @@ AddNrResult addNrSlot({
     sku = kNrSkuMin + rng.nextInt(skuRange);
   } while (usedSkus.contains(sku));
 
-  final ts = (now ?? DateTime.now().toUtc()).toIso8601String();
+  final ts = nowIso(now);
 
   return AddNrResult.ok(NewReleaseSlot(
     title: title,

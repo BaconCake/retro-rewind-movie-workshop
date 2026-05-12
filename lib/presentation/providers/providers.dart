@@ -27,6 +27,7 @@ import '../../domain/entities/texture_replacement.dart';
 import '../../domain/nr_slot_logic.dart';
 import '../../domain/replacements_migration.dart';
 import '../../domain/sort.dart';
+import '../../domain/timestamps.dart';
 import '../../domain/tracking.dart';
 import '../../domain/repositories/config_repository.dart';
 import '../../domain/repositories/pak_builder.dart';
@@ -176,7 +177,10 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
     await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
+    // Fire both controllers — each is a no-op when bkgTex doesn't match
+    // its slot type, so the caller doesn't need to dispatch.
     await _ref.read(slotsControllerProvider).touchEditTime(bkgTex);
+    await _ref.read(nrSlotsControllerProvider).touchEditTime(bkgTex);
   }
 
   Future<void> removeImage(String bkgTex) async {
@@ -188,7 +192,10 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
     await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
+    // Fire both controllers — each is a no-op when bkgTex doesn't match
+    // its slot type, so the caller doesn't need to dispatch.
     await _ref.read(slotsControllerProvider).touchEditTime(bkgTex);
+    await _ref.read(nrSlotsControllerProvider).touchEditTime(bkgTex);
   }
 
   /// Update the (offsetX, offsetY, zoom) crop transform for an existing
@@ -215,7 +222,10 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
     await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
+    // Fire both controllers — each is a no-op when bkgTex doesn't match
+    // its slot type, so the caller doesn't need to dispatch.
     await _ref.read(slotsControllerProvider).touchEditTime(bkgTex);
+    await _ref.read(nrSlotsControllerProvider).touchEditTime(bkgTex);
   }
 }
 
@@ -231,12 +241,6 @@ class SlotsController {
   final Ref _ref;
   SlotsController(this._ref);
 
-  /// Python's `_now_iso()` format (RR_VHS_Tool.py:2792-2795): local time,
-  /// no microseconds, no timezone suffix.  Keeping the format identical
-  /// to Python's keeps the lex-sort of mixed entries consistent when
-  /// both tools touch the same `custom_slots.json`.
-  String _nowIso() => DateTime.now().toIso8601String().split('.').first;
-
   Future<void> updateSlot(SlotData updated) async {
     final dir = _ref.read(workingDirProvider);
     final ds = CustomSlotsDataSource(dir);
@@ -246,7 +250,7 @@ class SlotsController {
     // represents a user-driven edit (title change, star/rarity regen,
     // layout pick).  Preserves whatever createdAt was already on the
     // slot (copyWith only overwrites the named field).
-    final touched = updated.copyWith(lastEditedAt: _nowIso());
+    final touched = updated.copyWith(lastEditedAt: nowIso());
 
     final next = <String, List<SlotData>>{};
     var found = false;
@@ -284,7 +288,7 @@ class SlotsController {
     final dir = _ref.read(workingDirProvider);
     final ds = CustomSlotsDataSource(dir);
     final current = await ds.load();
-    final ts = _nowIso();
+    final ts = nowIso();
     var found = false;
     final next = <String, List<SlotData>>{};
     for (final entry in current.entries) {
@@ -357,7 +361,7 @@ class SlotsController {
       lsc: 4,
       sku: sku,
       subTex: subTex,
-      createdAt: _nowIso(),
+      createdAt: nowIso(),
     );
 
     final next = Map<String, List<SlotData>>.from(current);
@@ -729,18 +733,21 @@ class NrSlotsController {
 
   /// Replace the slot identified by `updated.sku` in place.  No-op when
   /// no slot with that SKU exists.  Used by the options panel for title
-  /// edits, standee shape changes, and genre changes.
+  /// edits, standee shape changes, and genre changes.  Always bumps
+  /// `lastEditedAt` — Python parity with `_flush_pending_nr_timestamp`
+  /// (RR_VHS_Tool.py:7826-7845).
   Future<void> updateSlot(NewReleaseSlot updated) async {
     final dir = _ref.read(workingDirProvider);
     final ds = NrSlotsDataSource(dir);
     final current = await ds.load();
+    final touched = updated.copyWith(lastEditedAt: nowIso());
     var found = false;
     final next = [
       for (final s in current)
-        if (s.sku == updated.sku)
+        if (s.sku == touched.sku)
           (() {
             found = true;
-            return updated;
+            return touched;
           })()
         else
           s,
@@ -750,7 +757,36 @@ class NrSlotsController {
     _ref.invalidate(nrSlotsProvider);
     await _ref
         .read(trackingProvider.notifier)
-        .markEdited(nrSlotKey(updated));
+        .markEdited(nrSlotKey(touched));
+  }
+
+  /// Stamp `lastEditedAt = now` on the NR slot whose `bkgTex` matches.
+  /// Symmetric counterpart to `SlotsController.touchEditTime` — called
+  /// by `ReplacementsController` so cover-image edits to an NR also
+  /// register as editing the slot.
+  ///
+  /// No-op when [bkgTex] doesn't match any NR; that lets the caller
+  /// fire both controllers' `touchEditTime` calls blindly without
+  /// dispatching by `bkgTex` prefix.
+  Future<void> touchEditTime(String bkgTex) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = NrSlotsDataSource(dir);
+    final current = await ds.load();
+    final ts = nowIso();
+    var found = false;
+    final next = [
+      for (final s in current)
+        if (s.bkgTex == bkgTex)
+          (() {
+            found = true;
+            return s.copyWith(lastEditedAt: ts);
+          })()
+        else
+          s,
+    ];
+    if (!found) return;
+    await ds.save(next);
+    _ref.invalidate(nrSlotsProvider);
   }
 }
 
