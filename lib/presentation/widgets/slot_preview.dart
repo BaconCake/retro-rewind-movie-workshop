@@ -77,7 +77,15 @@ class SlotPreview extends ConsumerWidget {
                 ? Center(
                     child: AspectRatio(
                       aspectRatio: 1024 / 2048,
-                      child: _UploadPicker(bkgTex: slot.bkgTex),
+                      child: _UploadPicker(
+                        bkgTex: slot.bkgTex,
+                        // Preview the slot's layout overlay on the empty
+                        // canvas so the user can see what part of the
+                        // texture will be visible in-game before they
+                        // upload anything.  NR slots use the full canvas
+                        // so the picker leaves this null (no overlay).
+                        layout: slot.ls,
+                      ),
                     ),
                   )
                 : _CoverEditorBlock(
@@ -375,9 +383,17 @@ class _NrReplaceImageButtonState
 /// Click-to-upload placeholder shown when the slot has no image yet.
 /// Single-click opens a file picker — same code path as the right-rail
 /// UPLOAD button.
+///
+/// When [layout] is supplied (1..5 for a genre slot), the empty canvas
+/// also previews the layout-specific hidden / visible bands so the user
+/// can see what part of the texture will be on-screen in-game before
+/// uploading anything.  Matches Python's pre-upload dropzone overlay
+/// (RR_VHS_Tool.py:12533-12559).  NR slots use the full canvas and pass
+/// null — no overlay is drawn.
 class _UploadPicker extends ConsumerStatefulWidget {
   final String bkgTex;
-  const _UploadPicker({required this.bkgTex});
+  final int? layout;
+  const _UploadPicker({required this.bkgTex, this.layout});
 
   @override
   ConsumerState<_UploadPicker> createState() => _UploadPickerState();
@@ -418,11 +434,32 @@ class _UploadPickerState extends ConsumerState<_UploadPicker> {
             border: Border.all(color: kColorBorder),
           ),
           clipBehavior: Clip.antiAlias,
-          child: const _PreviewPlaceholder(
-            label: 'CLICK TO UPLOAD',
-            sublabel: 'PNG · JPG · WEBP · BMP',
-            icon: Icons.upload_file_outlined,
-            accent: kColorPink,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // Layout-aware red hidden zones + cyan visible-area
+              // outline drawn on the empty canvas so the user can see
+              // what part of the texture will be on-screen in-game
+              // before uploading anything.  Genre slots only — NR
+              // slots use the full canvas and pass null.  Uses the
+              // same painter as the active cropper so the appearance
+              // is consistent before and after upload.
+              if (widget.layout != null)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter:
+                          SafeAreaOverlayPainter(layout: widget.layout!),
+                    ),
+                  ),
+                ),
+              const _PreviewPlaceholder(
+                label: 'CLICK TO UPLOAD',
+                sublabel: 'PNG · JPG · WEBP · BMP',
+                icon: Icons.upload_file_outlined,
+                accent: kColorPink,
+              ),
+            ],
           ),
         ),
       ),

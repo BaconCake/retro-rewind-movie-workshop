@@ -368,21 +368,20 @@ class _CroppingPreviewState extends State<CroppingPreview> {
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                              CustomPaint(
-                                size: size,
-                                painter: _SafeAreaOverlayPainter(
-                                  layout: widget.layout,
-                                  // For NRs we never want the layout-style
-                                  // overlay — they don't have a layout 1..5
-                                  // visible area, and the red hatch would
-                                  // misrepresent what's hidden.
-                                  showOverlay: widget.nrShape != null
-                                      ? false
-                                      : widget.showOverlay,
-                                  centerSnapX: _centerSnapX,
-                                  centerSnapY: _centerSnapY,
+                              // Red hidden zones + cyan visible-area
+                              // outline — always drawn on genre slots,
+                              // never on NR slots (NRs use the full
+                              // canvas and have their own zone overlay
+                              // below).
+                              if (widget.nrShape == null)
+                                CustomPaint(
+                                  size: size,
+                                  painter: SafeAreaOverlayPainter(
+                                    layout: widget.layout,
+                                    centerSnapX: _centerSnapX,
+                                    centerSnapY: _centerSnapY,
+                                  ),
                                 ),
-                              ),
                               if (widget.nrShape != null)
                                 CustomPaint(
                                   size: size,
@@ -422,14 +421,12 @@ class _CroppingPreviewState extends State<CroppingPreview> {
 /// fall back to the layout-agnostic [kHiddenTop]/[kHiddenBottom]/
 /// [kHiddenLeft]/[kHiddenRight] bands the Python tool uses pre-layout
 /// (RR_VHS_Tool.py:11221-11225).
-class _SafeAreaOverlayPainter extends CustomPainter {
+class SafeAreaOverlayPainter extends CustomPainter {
   final int layout;
-  final bool showOverlay;
   final bool centerSnapX;
   final bool centerSnapY;
-  const _SafeAreaOverlayPainter({
+  const SafeAreaOverlayPainter({
     required this.layout,
-    this.showOverlay = false,
     this.centerSnapX = false,
     this.centerSnapY = false,
   });
@@ -467,29 +464,32 @@ class _SafeAreaOverlayPainter extends CustomPainter {
 
     final borderRect = Rect.fromLTRB(dvLeft, dvTop, dvRight, dvBot);
 
-    // Zones + cyan border are gated by `showOverlay` (LAYOUT OVERLAY pill).
-    // The snap-centre guide lines below are NOT — they fire on snap-to-
-    // centre regardless of overlay visibility, matching Pythons
-    // `_show_snap_guides` which paints them as separate canvas items
-    // (RR_VHS_Tool.py:11450-11502).
-    if (showOverlay) {
-      // Hidden zones — paint each non-empty band.
-      final zones = <Rect>[
-        if (dvTop > 0) Rect.fromLTRB(0, 0, size.width, dvTop),
-        if (dvBot < size.height)
-          Rect.fromLTRB(0, dvBot, size.width, size.height),
-        if (dvLeft > 0) Rect.fromLTRB(0, 0, dvLeft, size.height),
-        if (dvRight < size.width)
-          Rect.fromLTRB(dvRight, 0, size.width, size.height),
-      ];
-      for (final z in zones) {
-        _paintHatchedZone(canvas, z);
-      }
+    // Red hatched hidden zones — always drawn, regardless of the
+    // "Layout Overlay" toggle.  Python parity at RR_VHS_Tool.py:12614-
+    // 12624: the hatch is composited on every genre-slot render, the
+    // toggle only switches which *additional* layer (cyan line vs
+    // T_Layout texture) shows on top.
+    final zones = <Rect>[
+      if (dvTop > 0) Rect.fromLTRB(0, 0, size.width, dvTop),
+      if (dvBot < size.height)
+        Rect.fromLTRB(0, dvBot, size.width, size.height),
+      if (dvLeft > 0) Rect.fromLTRB(0, 0, dvLeft, size.height),
+      if (dvRight < size.width)
+        Rect.fromLTRB(dvRight, 0, size.width, size.height),
+    ];
+    for (final z in zones) {
+      _paintHatchedZone(canvas, z);
+    }
 
-      // Cyan dashed visible-area border (1px, dash 6,3 — matches Python).
-      if (borderRect.width > 0 && borderRect.height > 0) {
-        _paintDashedRect(canvas, borderRect);
-      }
+    // Cyan dashed visible-area border — also always drawn.  Once the
+    // T_Layout texture overlay lands (separate slice), this will be
+    // gated by `!showOverlay` to match Python (`_draw_safe_border_on_
+    // canvas` at RR_VHS_Tool.py:13200-13204 suppresses the cyan when
+    // the layout texture is composited, since the texture itself
+    // delineates the visible area).  Until then, keep both visible
+    // since the toggle is currently a no-op.
+    if (borderRect.width > 0 && borderRect.height > 0) {
+      _paintDashedRect(canvas, borderRect);
     }
 
     // Centre-axis snap guides — only while the user is dragging and the
@@ -616,9 +616,8 @@ class _SafeAreaOverlayPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_SafeAreaOverlayPainter old) =>
+  bool shouldRepaint(SafeAreaOverlayPainter old) =>
       old.layout != layout ||
-      old.showOverlay != showOverlay ||
       old.centerSnapX != centerSnapX ||
       old.centerSnapY != centerSnapY;
 }
