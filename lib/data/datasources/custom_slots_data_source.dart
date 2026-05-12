@@ -95,7 +95,7 @@ class CustomSlotsDataSource {
       ls: (m['ls'] as num?)?.toInt() ?? 0,
       lsc: (m['lsc'] as num?)?.toInt() ?? 4,
       sku: (m['sku'] as num?)?.toInt() ?? 0,
-      ntu: m['ntu'] as bool? ?? false,
+      isNewToUnlock: m['ntu'] as bool? ?? false,
       subTex: subTex is String && subTex.isNotEmpty ? subTex : null,
     );
   }

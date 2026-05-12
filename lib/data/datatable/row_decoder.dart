@@ -67,7 +67,7 @@ class RowDecoder {
             ls: ls,
             lsc: lsc,
             sku: sku,
-            ntu: false,
+            isNewToUnlock: false,
           ));
           seen.add(bkg);
         }

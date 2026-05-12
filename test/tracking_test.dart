@@ -13,7 +13,7 @@ SlotData _slot(String bkgTex) => SlotData(
       ls: 0,
       lsc: 0,
       sku: 0,
-      ntu: false,
+      isNewToUnlock: false,
     );
 
 NewReleaseSlot _nr(int sku) => NewReleaseSlot(

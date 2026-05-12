@@ -9,7 +9,7 @@ SlotData _slot(String bkgTex, {String pnName = ''}) => SlotData(
       ls: 0,
       lsc: 0,
       sku: 0,
-      ntu: false,
+      isNewToUnlock: false,
     );
 
 NewReleaseSlot _nr({

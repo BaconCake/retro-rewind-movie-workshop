@@ -55,7 +55,7 @@ void main() {
     ls: 7,
     lsc: 4,
     sku: 5304473,
-    ntu: false,
+    isNewToUnlock: false,
   );
 
   group('buildRow — V2 (standard genre, 2-digit BI)', () {

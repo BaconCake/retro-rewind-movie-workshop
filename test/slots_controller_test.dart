@@ -69,7 +69,7 @@ void main() {
               ls: 3,
               lsc: 7,
               sku: 99999999,
-              ntu: true,
+              isNewToUnlock: true,
               subTex: 'T_Sub_78',
             ),
           );
@@ -84,7 +84,7 @@ void main() {
       expect(loaded['Drama']![0].ls, 3);
       expect(loaded['Drama']![0].lsc, 7);
       expect(loaded['Drama']![0].sku, 99999999);
-      expect(loaded['Drama']![0].ntu, isTrue);
+      expect(loaded['Drama']![0].isNewToUnlock, isTrue);
       // Sibling untouched.
       expect(loaded['Drama']![1].pnName, 'Other');
       expect(loaded['Drama']![1].sku, 40200013);
