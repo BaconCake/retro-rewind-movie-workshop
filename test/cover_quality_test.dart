@@ -149,19 +149,10 @@ void main() {
       expect(a.level, CoverQualityLevel.ok);
     });
 
-    test('mild upscale 700×1400 (~1.46×) sits just below soft threshold', () {
-      final a = assessCoverQuality(
-        imageWidth: 700,
-        imageHeight: 1400,
-        zoom: 1.0,
-        offsetX: 0,
-        offsetY: 0,
-      );
-      // 1024/700 ≈ 1.463 < 1.5 → ok
-      expect(a.level, CoverQualityLevel.ok);
-    });
-
-    test('600×1200 source (~1.71×) → soft warn', () {
+    test('600×1200 source (~1.71×) sits below soft threshold', () {
+      // 1024/600 ≈ 1.71 — used to chip-spam NR covers at zoom=1 because
+      // cover-fit baseScale alone is 1.71 (no zoom involved).  After the
+      // 2026-05-12 threshold lift to 2.0× soft, this stays ok.
       final a = assessCoverQuality(
         imageWidth: 600,
         imageHeight: 1200,
@@ -169,11 +160,26 @@ void main() {
         offsetX: 0,
         offsetY: 0,
       );
-      expect(a.level, CoverQualityLevel.softWarn);
-      expect(a.reason, contains('1.7'));
+      expect(a.level, CoverQualityLevel.ok);
     });
 
-    test('300×600 source (~3.4×) → hard warn', () {
+    test('500×1000 source (~2.05×) → soft warn', () {
+      final a = assessCoverQuality(
+        imageWidth: 500,
+        imageHeight: 1000,
+        zoom: 1.0,
+        offsetX: 0,
+        offsetY: 0,
+      );
+      expect(a.level, CoverQualityLevel.softWarn);
+      expect(a.reason, contains('2.0'));
+    });
+
+    test('300×600 source (~3.4×) → soft warn (below new hard threshold)',
+        () {
+      // After the threshold lift, 3.4× is no longer hard-warn — hard
+      // starts at 4×.  Still a soft warn though, the image will look
+      // noticeably soft in-game.
       final a = assessCoverQuality(
         imageWidth: 300,
         imageHeight: 600,
@@ -181,16 +187,28 @@ void main() {
         offsetX: 0,
         offsetY: 0,
       );
-      expect(a.level, CoverQualityLevel.hardWarn);
+      expect(a.level, CoverQualityLevel.softWarn);
       expect(a.reason, contains('3.4'));
     });
 
+    test('250×500 source (~4.1×) → hard warn', () {
+      final a = assessCoverQuality(
+        imageWidth: 250,
+        imageHeight: 500,
+        zoom: 1.0,
+        offsetX: 0,
+        offsetY: 0,
+      );
+      expect(a.level, CoverQualityLevel.hardWarn);
+      expect(a.reason, contains('4.1'));
+    });
+
     test('heavy user zoom on a good source still triggers hard warn', () {
-      // 1024×2048 source at zoom=3.5 → effective scale 3.5 → hard warn
+      // 1024×2048 source at zoom=4.5 → effective scale 4.5 → hard warn
       final a = assessCoverQuality(
         imageWidth: 1024,
         imageHeight: 2048,
-        zoom: 3.5,
+        zoom: 4.5,
         offsetX: 0,
         offsetY: 0,
       );
@@ -255,12 +273,13 @@ void main() {
     });
 
     test('hard upscale wins over soft coverage warn (most-severe rule)', () {
-      // 300×600 source: 3.4× upscale.  Coverage at zoom=1 is 1.0 because
-      // cover-fit fills the canvas — so the upscale wins anyway, but the
-      // assertion makes the precedence explicit if defaults change.
+      // 200×400 source: 5.1× upscale (well over the hard threshold).
+      // Coverage at zoom=1 is 1.0 because cover-fit fills the canvas,
+      // so the upscale wins anyway, but the assertion pins the
+      // precedence explicit if defaults change.
       final a = assessCoverQuality(
-        imageWidth: 300,
-        imageHeight: 600,
+        imageWidth: 200,
+        imageHeight: 400,
         zoom: 1.0,
         offsetX: 0,
         offsetY: 0,

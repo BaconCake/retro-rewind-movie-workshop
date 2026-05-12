@@ -77,12 +77,18 @@ double canvasCoverage({
   return (coveredW * coveredH) / (canvasWidth * canvasHeight);
 }
 
-// Thresholds tuned per design briefing §6.3 + §10.2: "warning chip when
+// Thresholds tuned per design briefing §6.3 + §10.2 ("warning chip when
 // the image is being scaled past its native resolution and quality will
-// suffer".  Defaults err on the cautious side — most user covers are
-// 600-1500px wide, which sits squarely in the soft-warn band.
-const double _kUpscaleSoft = 1.5; // image rendered ≥ 1.5× native
-const double _kUpscaleHard = 3.0; // ≥ 3× native — looks blurry in-game
+// suffer") and a live-test pass on 2026-05-12.
+//
+// Earlier soft=1.5× / hard=3× chip-spammed NR covers in the common case
+// where a ~600 px-wide source is laid into the 1024-wide canvas: the
+// minimum cover-fit baseScale alone is already 1.7×, and zoom < 1 just
+// exposes black gutters.  Real visual loss is dominated by the build's
+// DXT1 + mip pass anyway, which absorbs small upscales.  Raised so the
+// chip only appears when the upscale is genuinely noticeable in-game.
+const double _kUpscaleSoft = 2.0; // image rendered ≥ 2× native
+const double _kUpscaleHard = 4.0; // ≥ 4× native — clearly blurry in-game
 const double _kCoverageSoft = 0.98; // > 2 % of canvas exports as black
 const double _kCoverageHard = 0.80; // > 20 % black — clearly broken
 
