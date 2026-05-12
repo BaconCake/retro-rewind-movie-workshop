@@ -29,4 +29,17 @@ title_changes.json
 custom_slots.json
 nr_custom_slots.json
 shipped_slots.json
+edited_slots.json
+sort_preferences.json
 base_slot_edits.json
+
+# Runtime caches
+.pasted_covers/
+layout_cache/
+
+# Backups + stray artifacts
+*.bak
+flutter_01.png
+
+# Adhoc scripts (not part of the shipped tool)
+scripts/
