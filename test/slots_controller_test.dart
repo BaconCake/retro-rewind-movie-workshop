@@ -455,4 +455,117 @@ void main() {
       expect(await f.lastModified(), mtimeBefore);
     });
   });
+
+  group('SlotsController timestamps', () {
+    late Directory tmp;
+    late ProviderContainer container;
+
+    GenreInfo drama() => kGenres.firstWhere((g) => g.name == 'Drama');
+
+    setUp(() async {
+      tmp = await Directory.systemTemp.createTemp('rr_ts_test_');
+      container = ProviderContainer(overrides: [
+        workingDirProvider.overrideWithValue(tmp.path),
+      ]);
+    });
+
+    tearDown(() async {
+      container.dispose();
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {/* best-effort */}
+    });
+
+    Future<Map<String, List<SlotData>>> read() =>
+        CustomSlotsDataSource(tmp.path).load();
+
+    // Python `_now_iso()` format: YYYY-MM-DDTHH:MM:SS (local time,
+    // no microseconds, no tz suffix).  Matching this exactly is what
+    // keeps cross-tool sort stable.
+    final iso = RegExp(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$');
+
+    test('addSlot writes createdAt, leaves lastEditedAt null', () async {
+      await container
+          .read(slotsControllerProvider)
+          .addSlot(genre: drama(), title: 'fresh');
+
+      final s = (await read())['Drama']!.single;
+      expect(s.createdAt, matches(iso));
+      expect(s.lastEditedAt, isNull);
+    });
+
+    test('updateSlot bumps lastEditedAt without touching createdAt',
+        () async {
+      await container
+          .read(slotsControllerProvider)
+          .addSlot(genre: drama(), title: 'orig');
+      final before = (await read())['Drama']!.single;
+      // Sleep one second so the new timestamp differs at the second
+      // resolution (Python's format truncates to seconds, so two
+      // back-to-back writes within the same second would tie).
+      await Future<void>.delayed(const Duration(seconds: 1));
+
+      await container.read(slotsControllerProvider).updateSlot(
+            before.copyWith(pnName: 'renamed'),
+          );
+
+      final after = (await read())['Drama']!.single;
+      expect(after.createdAt, before.createdAt,
+          reason: 'createdAt must never change after creation');
+      expect(after.lastEditedAt, matches(iso));
+      expect(after.lastEditedAt, isNot(before.createdAt),
+          reason: 'second-precision timestamps differ across the sleep');
+    });
+
+    test('touchEditTime stamps lastEditedAt, preserves createdAt',
+        () async {
+      await container
+          .read(slotsControllerProvider)
+          .addSlot(genre: drama(), title: 'x');
+      final created = (await read())['Drama']!.single.createdAt;
+      await Future<void>.delayed(const Duration(seconds: 1));
+
+      await container
+          .read(slotsControllerProvider)
+          .touchEditTime('T_Bkg_Dra_001');
+
+      final s = (await read())['Drama']!.single;
+      expect(s.createdAt, created);
+      expect(s.lastEditedAt, matches(iso));
+    });
+
+    test('touchEditTime is a no-op for unknown bkgTex', () async {
+      await container
+          .read(slotsControllerProvider)
+          .addSlot(genre: drama(), title: 'x');
+      final f = File(p.join(tmp.path, 'custom_slots.json'));
+      final before = await f.readAsString();
+
+      await container
+          .read(slotsControllerProvider)
+          .touchEditTime('T_New_Hor_001'); // NR bkgTex, not in custom_slots
+
+      expect(await f.readAsString(), before,
+          reason: 'unknown bkgTex must not rewrite the file');
+    });
+
+    test(
+        'image edit via ReplacementsController.setImage timestamps the slot',
+        () async {
+      await container
+          .read(slotsControllerProvider)
+          .addSlot(genre: drama(), title: 'x');
+      await Future<void>.delayed(const Duration(seconds: 1));
+
+      await container
+          .read(replacementsControllerProvider)
+          .setImage('T_Bkg_Dra_001', 'C:/some/cover.png');
+
+      final s = (await read())['Drama']!.single;
+      expect(s.lastEditedAt, matches(iso),
+          reason:
+              'setImage must touch lastEditedAt so cover uploads count '
+              'as editing the slot for sort purposes');
+    });
+  });
 }

@@ -75,9 +75,9 @@ List<SlotData> sortSlots(List<SlotData> slots, SortKey key) {
     return [for (final e in indexed) e.$2];
   }
 
-  // Date sort.  SlotData has no created_at / last_edited_at yet, so
-  // _slotTimestamp always returns null today.  Once timestamps are
-  // wired, this code just picks them up — no other change needed.
+  // Date sort.  Slots created before the timestamp fields landed (or
+  // hand-edited custom_slots.json without them) still return null and
+  // sort into the no-ts bucket by index — the same fallback Python uses.
   final withTs = <(int, SlotData, String)>[];
   final noTs = <(int, SlotData)>[];
   for (final (i, s) in indexed) {
@@ -103,9 +103,10 @@ List<SlotData> sortSlots(List<SlotData> slots, SortKey key) {
 }
 
 String? _slotTimestamp(SlotData s, _SortField field) {
-  // Hook for when SlotData gains created_at / last_edited_at.  Returns
-  // null today — every genre slot is treated as legacy / no-timestamp.
-  return null;
+  final ts =
+      field == _SortField.created ? s.createdAt : s.lastEditedAt;
+  if (ts == null || ts.isEmpty) return null;
+  return ts;
 }
 
 /// Sort an NR slot list, preserving each slot's original position in

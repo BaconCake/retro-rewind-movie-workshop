@@ -3,13 +3,21 @@ import 'package:rr_movie_workshop/data/datatable/slot_data.dart';
 import 'package:rr_movie_workshop/domain/entities/new_release_slot.dart';
 import 'package:rr_movie_workshop/domain/sort.dart';
 
-SlotData _slot(String bkgTex, {String pnName = ''}) => SlotData(
+SlotData _slot(
+  String bkgTex, {
+  String pnName = '',
+  String? createdAt,
+  String? lastEditedAt,
+}) =>
+    SlotData(
       bkgTex: bkgTex,
       pnName: pnName,
       ls: 0,
       lsc: 0,
       sku: 0,
       isNewToUnlock: false,
+      createdAt: createdAt,
+      lastEditedAt: lastEditedAt,
     );
 
 NewReleaseSlot _nr({
@@ -84,12 +92,12 @@ void main() {
     });
   });
 
-  group('sortSlots — date with no timestamps (today\'s SlotData)', () {
+  group('sortSlots — date with no timestamps (legacy slots)', () {
     test('date_asc falls back to original index (legacy order)', () {
-      // SlotData has no timestamps yet; every slot lands in the no-ts
-      // bucket which sorts by original index.  Asc preserves the input
-      // order — that's why the legacy library doesn't visually shift
-      // when sort defaults to created_asc.
+      // Slots without createdAt/lastEditedAt land in the no-ts bucket
+      // which sorts by original index.  Asc preserves the input order —
+      // that's why a legacy library doesn't visually shift when the
+      // default sort is created_asc.
       final input = [
         _slot('a', pnName: 'Z'),
         _slot('b', pnName: 'A'),
@@ -107,6 +115,45 @@ void main() {
       ];
       final out = sortSlots(input, SortKey.createdDesc);
       expect(out.map((s) => s.bkgTex).toList(), ['c', 'b', 'a']);
+    });
+  });
+
+  group('sortSlots — date timestamps', () {
+    test('with-timestamp entries come before no-timestamp in both directions',
+        () {
+      // Mixed library: timestamped slots get the date order; legacy
+      // (no-ts) slots cluster at the end by original index.  Mirrors
+      // Python's split-bucket rule (RR_VHS_Tool.py:2942-2947).
+      final input = [
+        _slot('a'), // no ts
+        _slot('b', createdAt: '2026-01-01T00:00:00'),
+        _slot('c'), // no ts
+        _slot('d', createdAt: '2026-03-01T00:00:00'),
+      ];
+      final asc = sortSlots(input, SortKey.createdAsc);
+      expect(asc.map((s) => s.bkgTex).toList(), ['b', 'd', 'a', 'c'],
+          reason: 'with-ts in chronological order, then no-ts by index');
+
+      final desc = sortSlots(input, SortKey.createdDesc);
+      expect(desc.map((s) => s.bkgTex).toList(), ['d', 'b', 'c', 'a'],
+          reason: 'desc flips within each bucket but not between buckets');
+    });
+
+    test('lastEditedAt sort reads the right field', () {
+      final input = [
+        _slot('a',
+            createdAt: '2026-01-01T00:00:00',
+            lastEditedAt: '2026-05-01T00:00:00'),
+        _slot('b',
+            createdAt: '2026-03-01T00:00:00',
+            lastEditedAt: '2026-04-01T00:00:00'),
+      ];
+      // Created order: a then b.  Edited order: b then a (b was edited
+      // earlier than a despite being created later).
+      expect(sortSlots(input, SortKey.createdAsc).map((s) => s.bkgTex),
+          ['a', 'b']);
+      expect(sortSlots(input, SortKey.editedAsc).map((s) => s.bkgTex),
+          ['b', 'a']);
     });
   });
 

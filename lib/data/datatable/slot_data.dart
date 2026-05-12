@@ -39,6 +39,25 @@ class SlotData {
   /// RR_VHS_Tool.py:1044-1047, 1683-1694.
   final String? subTex;
 
+  /// ISO-8601 local-time stamp recorded once when the slot is first
+  /// created by `SlotsController.addSlot`.  Never updated afterwards.
+  /// Drives the "Created at" sort.  Null for legacy slots written
+  /// before this field existed — they fall into the no-timestamp bucket
+  /// and sort by slot index, matching Python's behaviour at
+  /// `_sort_textures` (RR_VHS_Tool.py:2895-2947).
+  ///
+  /// JSON wire key: `created_at` (Python parity).
+  final String? createdAt;
+
+  /// ISO-8601 local-time stamp updated every time the slot is edited via
+  /// `SlotsController.updateSlot` or `touchEditTime` (the latter fires on
+  /// cover-image edits routed through `ReplacementsController`).  Null for
+  /// slots that have not been edited since the field was added; same
+  /// no-timestamp fallback as [createdAt].
+  ///
+  /// JSON wire key: `last_edited_at` (Python parity).
+  final String? lastEditedAt;
+
   const SlotData({
     required this.bkgTex,
     required this.pnName,
@@ -47,6 +66,8 @@ class SlotData {
     required this.sku,
     this.isNewToUnlock = false,
     this.subTex,
+    this.createdAt,
+    this.lastEditedAt,
   });
 
   SlotData copyWith({
@@ -57,6 +78,8 @@ class SlotData {
     int? sku,
     bool? isNewToUnlock,
     String? subTex,
+    String? createdAt,
+    String? lastEditedAt,
   }) {
     return SlotData(
       bkgTex: bkgTex ?? this.bkgTex,
@@ -66,14 +89,17 @@ class SlotData {
       sku: sku ?? this.sku,
       isNewToUnlock: isNewToUnlock ?? this.isNewToUnlock,
       subTex: subTex ?? this.subTex,
+      createdAt: createdAt ?? this.createdAt,
+      lastEditedAt: lastEditedAt ?? this.lastEditedAt,
     );
   }
 
   /// JSON shape consumed by `custom_slots.json` — same key set the Python
   /// tool reads/writes (RR_VHS_Tool.py:556-580).  Wire key stays `"ntu"`
   /// to keep the file format binary-compatible with the Python tool.
-  /// `sub_tex` is omitted when null so we don't pollute hand-edited files
-  /// with explicit `null`s.
+  /// Nullable fields (`sub_tex`, `created_at`, `last_edited_at`) are
+  /// omitted when null so we don't pollute hand-edited files with
+  /// explicit `null`s and so legacy on-disk shapes stay byte-identical.
   Map<String, Object> toJson() {
     return {
       'bkg_tex': bkgTex,
@@ -83,6 +109,8 @@ class SlotData {
       'lsc': lsc,
       'sku': sku,
       'ntu': isNewToUnlock,
+      'created_at': ?createdAt,
+      'last_edited_at': ?lastEditedAt,
     };
   }
 }

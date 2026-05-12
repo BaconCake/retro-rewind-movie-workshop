@@ -176,6 +176,7 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
     await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
+    await _ref.read(slotsControllerProvider).touchEditTime(bkgTex);
   }
 
   Future<void> removeImage(String bkgTex) async {
@@ -187,6 +188,7 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
     await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
+    await _ref.read(slotsControllerProvider).touchEditTime(bkgTex);
   }
 
   /// Update the (offsetX, offsetY, zoom) crop transform for an existing
@@ -213,6 +215,7 @@ class ReplacementsController {
     await ds.save(next);
     _ref.invalidate(replacementsProvider);
     await _ref.read(trackingProvider.notifier).markEditedForBkgTex(bkgTex);
+    await _ref.read(slotsControllerProvider).touchEditTime(bkgTex);
   }
 }
 
@@ -228,20 +231,32 @@ class SlotsController {
   final Ref _ref;
   SlotsController(this._ref);
 
+  /// Python's `_now_iso()` format (RR_VHS_Tool.py:2792-2795): local time,
+  /// no microseconds, no timezone suffix.  Keeping the format identical
+  /// to Python's keeps the lex-sort of mixed entries consistent when
+  /// both tools touch the same `custom_slots.json`.
+  String _nowIso() => DateTime.now().toIso8601String().split('.').first;
+
   Future<void> updateSlot(SlotData updated) async {
     final dir = _ref.read(workingDirProvider);
     final ds = CustomSlotsDataSource(dir);
     final current = await ds.load();
+
+    // Bump lastEditedAt unconditionally — every call to updateSlot
+    // represents a user-driven edit (title change, star/rarity regen,
+    // layout pick).  Preserves whatever createdAt was already on the
+    // slot (copyWith only overwrites the named field).
+    final touched = updated.copyWith(lastEditedAt: _nowIso());
 
     final next = <String, List<SlotData>>{};
     var found = false;
     for (final entry in current.entries) {
       next[entry.key] = [
         for (final s in entry.value)
-          if (s.bkgTex == updated.bkgTex)
+          if (s.bkgTex == touched.bkgTex)
             (() {
               found = true;
-              return updated;
+              return touched;
             })()
           else
             s,
@@ -253,7 +268,40 @@ class SlotsController {
     _ref.invalidate(customSlotsProvider);
     await _ref
         .read(trackingProvider.notifier)
-        .markEdited(genreSlotKey(updated));
+        .markEdited(genreSlotKey(touched));
+  }
+
+  /// Stamp `lastEditedAt = now` on the slot identified by [bkgTex].
+  /// No-op when [bkgTex] doesn't match any genre slot — that lets
+  /// `ReplacementsController` call this for both genre and NR
+  /// bkgTexes; NR-side timestamps would need a separate path on the
+  /// NR controller, but they aren't surfaced here.
+  ///
+  /// Does NOT touch tracking or invalidate replacementsProvider — the
+  /// caller (ReplacementsController) handles both.  Invalidates
+  /// customSlotsProvider so the shelf re-sorts immediately.
+  Future<void> touchEditTime(String bkgTex) async {
+    final dir = _ref.read(workingDirProvider);
+    final ds = CustomSlotsDataSource(dir);
+    final current = await ds.load();
+    final ts = _nowIso();
+    var found = false;
+    final next = <String, List<SlotData>>{};
+    for (final entry in current.entries) {
+      next[entry.key] = [
+        for (final s in entry.value)
+          if (s.bkgTex == bkgTex)
+            (() {
+              found = true;
+              return s.copyWith(lastEditedAt: ts);
+            })()
+          else
+            s,
+      ];
+    }
+    if (!found) return;
+    await ds.save(next);
+    _ref.invalidate(customSlotsProvider);
   }
 
   /// Append a new custom slot to [genre] with the given title + star/rarity
@@ -309,6 +357,7 @@ class SlotsController {
       lsc: 4,
       sku: sku,
       subTex: subTex,
+      createdAt: _nowIso(),
     );
 
     final next = Map<String, List<SlotData>>.from(current);
