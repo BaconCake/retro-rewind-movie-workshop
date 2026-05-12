@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
+import '../../domain/custom_slot_naming.dart';
 import '../providers/providers.dart';
 
 /// Horizontal tab strip mirroring RR_VHS_Tool.py:7322-7432.
@@ -37,10 +38,13 @@ class GenreTabBar extends ConsumerWidget {
 
     final tabs = <_TabSpec>[
       _TabSpec(label: _allMovies, count: allCount),
-      ...kGenres.map((g) => _TabSpec(
-            label: g.name,
-            count: counts[g.dataTableName] ?? 0,
-          )),
+      ...kGenres
+          .where((g) => !kHiddenGenres.contains(g.name))
+          .map((g) => _TabSpec(
+                label: g.name,
+                count: counts[g.dataTableName] ?? 0,
+                color: kGenreColors[g.name],
+              )),
       _TabSpec(label: _newReleases, count: nrCount),
     ];
 
@@ -83,7 +87,17 @@ class GenreTabBar extends ConsumerWidget {
 class _TabSpec {
   final String label;
   final int count;
-  const _TabSpec({required this.label, required this.count});
+
+  /// Genre tint — present for the 12 visible genres, null for "All Movies"
+  /// and "New Releases".  Drives both the selected-tab background colour
+  /// and the unselected-tab bottom-stripe accent.
+  final GenreColor? color;
+
+  const _TabSpec({
+    required this.label,
+    required this.count,
+    this.color,
+  });
 }
 
 class _Tab extends StatelessWidget {
@@ -99,16 +113,43 @@ class _Tab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasCustom = spec.count > 0;
-    final labelColor = selected
-        ? kColorCyan
-        : hasCustom
-            ? kColorText
-            : kColorText3;
+    // Resolve the four visual states — Python parity with
+    // `_update_tab_colors` (RR_VHS_Tool.py:9636-9708):
+    //
+    //   * selected + genre colour      → genre bg, contrasting fg
+    //   * selected + no genre colour   → panel bg, cyan accent (All Movies,
+    //                                     New Releases)
+    //   * unselected + genre colour    → app bg, 2px coloured bottom stripe
+    //   * unselected + no genre colour → app bg, no stripe
+    final gc = spec.color;
+    final Color tabBg;
+    final Color labelFg;
+    final FontWeight labelWeight =
+        selected ? FontWeight.w700 : FontWeight.w400;
+    final Color bottomStripe;
+
+    if (selected && gc != null) {
+      tabBg = gc.bg;
+      labelFg = gc.fg;
+      bottomStripe = Colors.transparent;
+    } else if (selected) {
+      tabBg = kColorPanel;
+      labelFg = kColorCyan;
+      bottomStripe = kColorCyan;
+    } else if (gc != null) {
+      tabBg = kColorBg;
+      labelFg = spec.count > 0 ? kColorText : kColorText3;
+      bottomStripe = gc.bg;
+    } else {
+      tabBg = kColorBg;
+      labelFg = spec.count > 0 ? kColorText : kColorText3;
+      bottomStripe = Colors.transparent;
+    }
 
     return InkWell(
       onTap: onTap,
-      child: Padding(
+      child: Container(
+        color: tabBg,
         padding: const EdgeInsets.symmetric(
             horizontal: kSp3, vertical: kSp2),
         child: Column(
@@ -122,22 +163,24 @@ class _Tab extends StatelessWidget {
                   spec.label,
                   style: TextStyle(
                     fontSize: kFsBody,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
-                    color: labelColor,
+                    fontWeight: labelWeight,
+                    color: labelFg,
                     letterSpacing: 0.5,
                   ),
                 ),
                 const SizedBox(width: kSp1),
-                _CountBadge(count: spec.count),
+                _CountBadge(
+                  count: spec.count,
+                  selected: selected,
+                  genreColor: gc,
+                ),
               ],
             ),
             const SizedBox(height: kSp1),
-            // Underline — cyan 2px when selected, transparent otherwise.
-            // Matches Python's tab underline (RR_VHS_Tool.py:7382).
             Container(
               height: 2,
               width: 64,
-              color: selected ? kColorCyan : Colors.transparent,
+              color: bottomStripe,
             ),
           ],
         ),
@@ -148,18 +191,42 @@ class _Tab extends StatelessWidget {
 
 class _CountBadge extends StatelessWidget {
   final int count;
-  const _CountBadge({required this.count});
+  final bool selected;
+  final GenreColor? genreColor;
+
+  const _CountBadge({
+    required this.count,
+    required this.selected,
+    required this.genreColor,
+  });
 
   @override
   Widget build(BuildContext context) {
+    // Mirrors Python's badge palette (RR_VHS_Tool.py:9668-9678):
+    //   * selected + genre colour     → invert: bg = fg of genre, fg = bg
+    //   * selected + no genre colour  → cyan bg, dark fg
+    //   * unselected                  → neutral border bg, dim fg
+    final Color badgeBg;
+    final Color badgeFg;
+    if (selected && genreColor != null) {
+      badgeBg = genreColor!.fg;
+      badgeFg = genreColor!.bg;
+    } else if (selected) {
+      badgeBg = kColorCyan;
+      badgeFg = kColorTextInv;
+    } else {
+      badgeBg = kColorBorder;
+      badgeFg = kColorText3;
+    }
+
     return Container(
-      color: kColorBorder,
+      color: badgeBg,
       padding: const EdgeInsets.symmetric(horizontal: kSp1, vertical: 0),
       child: Text(
         '$count',
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: kFsMeta,
-          color: kColorText3,
+          color: badgeFg,
           height: 1.2,
         ),
       ),
