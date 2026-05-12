@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../providers/providers.dart';
+import '../widgets/clear_all_dialog.dart';
 import '../widgets/cover_drop_paste_zone.dart';
 import '../widgets/genre_tab_bar.dart';
 import '../widgets/setup_dialog.dart';
@@ -51,6 +52,20 @@ class _HomePageState extends ConsumerState<HomePage> {
     await SetupDialog.show(context, ref);
   }
 
+  Future<void> _openClearAll() async {
+    final removed = await ClearAllDialog.show(context, ref);
+    if (removed == null || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: kColorPanel,
+        content: Text(
+          'Removed $removed movie${removed == 1 ? '' : 's'}.',
+          style: const TextStyle(color: kColorText),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Kick off the layout-texture preload as soon as the app paints, so
@@ -79,6 +94,11 @@ class _HomePageState extends ConsumerState<HomePage> {
               ref.invalidate(customSlotsProvider);
               ref.invalidate(replacementsProvider);
             },
+          ),
+          IconButton(
+            tooltip: 'Clear all custom movies',
+            icon: const Icon(Icons.delete_sweep_outlined, color: kColorText3),
+            onPressed: () => _openClearAll(),
           ),
           const SizedBox(width: kSp2),
         ],

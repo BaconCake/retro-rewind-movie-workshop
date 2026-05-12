@@ -373,6 +373,52 @@ final slotsControllerProvider = Provider<SlotsController>(
   (ref) => SlotsController(ref),
 );
 
+/// Wipe the entire custom library in one shot: clears `custom_slots.json`,
+/// `nr_custom_slots.json`, `replacements.json` and both tracking sets, then
+/// clears the active selection.  Bulk-write rather than per-slot loop —
+/// matches Python's `_clear_all_custom` (RR_VHS_Tool.py:10814-10847) and
+/// keeps the operation fast for large libraries.
+class ClearAllController {
+  final Ref _ref;
+  ClearAllController(this._ref);
+
+  /// Returns the count actually removed (genre + NR), so the caller can
+  /// show a "Removed N movies" toast.  Zero when the library was already
+  /// empty (and no files touched).
+  Future<int> call() async {
+    final dir = _ref.read(workingDirProvider);
+
+    final slotsDs = CustomSlotsDataSource(dir);
+    final nrDs = NrSlotsDataSource(dir);
+    final replDs = ReplacementsDataSource(dir);
+
+    final genreCurrent = await slotsDs.load();
+    final nrCurrent = await nrDs.load();
+    final genreCount =
+        genreCurrent.values.fold<int>(0, (acc, list) => acc + list.length);
+    final nrCount = nrCurrent.length;
+    if (genreCount == 0 && nrCount == 0) return 0;
+
+    await slotsDs.save(const <String, List<SlotData>>{});
+    await nrDs.save(const <NewReleaseSlot>[]);
+    await replDs.save(const <String, TextureReplacement>{});
+
+    // Reset tracking (both sets), then clear the active selection so the
+    // right rail doesn't briefly point at a vanished slot.
+    await _ref.read(trackingProvider.notifier).clearAll();
+    _ref.read(selectedSlotBkgProvider.notifier).state = null;
+
+    _ref.invalidate(customSlotsProvider);
+    _ref.invalidate(nrSlotsProvider);
+    _ref.invalidate(replacementsProvider);
+
+    return genreCount + nrCount;
+  }
+}
+
+final clearAllControllerProvider =
+    Provider<ClearAllController>((ref) => ClearAllController(ref));
+
 /// New Release slots from `nr_custom_slots.json`.  Runs the three load-
 /// time migrations Python performs (RR_VHS_Tool.py:2055-2113) and re-
 /// persists when any of them mutated the list, so legacy quirks heal
@@ -458,6 +504,7 @@ class TrackingNotifier extends StateNotifier<TrackingState> {
 
   Future<void> _init() async {
     final edited = await _editedDs().load();
+    if (!mounted) return;
     final shipped = await _shippedDs().load();
     if (!mounted) return;
     state = TrackingState(edited: edited, shipped: shipped);
@@ -541,6 +588,17 @@ class TrackingNotifier extends StateNotifier<TrackingState> {
     state = TrackingState(edited: const <String>{}, shipped: currentKeys);
     await _editedDs().delete();
     await _shippedDs().save(currentKeys);
+  }
+
+  /// Drop both tracking sets — used by the bulk-delete flow.  Python parity
+  /// at RR_VHS_Tool.py:10830-10833: a fresh slot created after clear-all
+  /// reuses the smallest-free tex_num (likely 001 again), and would
+  /// otherwise inherit a stale "shipped" badge from the prior occupant.
+  Future<void> clearAll() async {
+    if (state.edited.isEmpty && state.shipped.isEmpty) return;
+    state = const TrackingState();
+    await _editedDs().delete();
+    await _shippedDs().delete();
   }
 }
 
