@@ -8,10 +8,12 @@ import 'package:path/path.dart' as p;
 import '../../core/theme/app_theme.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../data/services/cover_actions.dart';
+import '../../domain/cover_quality.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
 import '../providers/providers.dart';
 import 'cover_drop_paste_zone.dart';
+import 'cover_quality_chip.dart';
 import 'crop_editor_bar.dart';
 import 'cropping_preview.dart';
 import 'layout_style_picker.dart';
@@ -742,27 +744,46 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
           : fileName,
       orElse: () => fileName,
     );
+    final quality = dimsAsync.maybeWhen(
+      data: (dims) => dims == null
+          ? CoverQualityAssessment.ok
+          : assessCoverQuality(
+              imageWidth: dims.w,
+              imageHeight: dims.h,
+              zoom: _zoom,
+              offsetX: _x,
+              offsetY: _y,
+            ),
+      orElse: () => CoverQualityAssessment.ok,
+    );
 
     return Column(
       children: [
         Expanded(child: coverWithLabels),
         const SizedBox(height: kSp1),
-        // Filename + resolution under the cover — port of Python's
-        // `_info_var` row (RR_VHS_Tool.py:7954-7959, 11657-11675).
-        // Left-anchored, dim text, ellipsised so long paths don't push
-        // the editor bar around.
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            infoText,
-            style: const TextStyle(
-              fontFamily: kFontFamily,
-              fontSize: kFsMeta,
-              color: kColorText3,
+        // Filename + resolution under the cover, plus the quality-warning
+        // chip (briefing §6.3 + §10.2 — small chip near the canvas when
+        // the image is upscaled or barely covering the canvas).  Port of
+        // Python's `_info_var` row (RR_VHS_Tool.py:7954-7959, 11657-11675).
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                infoText,
+                style: const TextStyle(
+                  fontFamily: kFontFamily,
+                  fontSize: kFsMeta,
+                  color: kColorText3,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+            if (quality.level != CoverQualityLevel.ok) ...[
+              const SizedBox(width: kSp2),
+              CoverQualityChip(assessment: quality),
+            ],
+          ],
         ),
         const SizedBox(height: kSp1),
         CropEditorBar(
