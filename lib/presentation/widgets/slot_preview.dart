@@ -753,6 +753,10 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
               zoom: _zoom,
               offsetX: _x,
               offsetY: _y,
+              // Only the NR full-canvas case can meaningfully be
+              // "X % of canvas empty" — for genre slots Fit-Visible
+              // intentionally leaves the layout's hidden zones black.
+              checkCanvasCoverage: widget.isNewRelease,
             ),
       orElse: () => CoverQualityAssessment.ok,
     );

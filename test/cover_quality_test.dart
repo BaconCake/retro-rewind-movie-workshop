@@ -197,7 +197,7 @@ void main() {
       expect(a.level, CoverQualityLevel.hardWarn);
     });
 
-    test('low coverage from low zoom → soft warn', () {
+    test('low coverage from low zoom → soft warn (NR opt-in)', () {
       // zoom=0.9 with no offset → coverage = 0.81 → soft warn
       final a = assessCoverQuality(
         imageWidth: 1024,
@@ -205,12 +205,13 @@ void main() {
         zoom: 0.9,
         offsetX: 0,
         offsetY: 0,
+        checkCanvasCoverage: true,
       );
       expect(a.level, CoverQualityLevel.softWarn);
       expect(a.reason, contains('empty'));
     });
 
-    test('very low coverage → hard warn', () {
+    test('very low coverage → hard warn (NR opt-in)', () {
       // zoom=0.5 → coverage = 0.25 → hard warn
       final a = assessCoverQuality(
         imageWidth: 1024,
@@ -218,9 +219,39 @@ void main() {
         zoom: 0.5,
         offsetX: 0,
         offsetY: 0,
+        checkCanvasCoverage: true,
       );
       expect(a.level, CoverQualityLevel.hardWarn);
       expect(a.reason, contains('empty'));
+    });
+
+    test('low coverage is silent for genre slots (coverage check off)', () {
+      // Same zoom=0.5 input, but coverage check disabled — chip stays
+      // ok so a Fit-Visible'd genre cover doesn't spam "20% empty".
+      final a = assessCoverQuality(
+        imageWidth: 1024,
+        imageHeight: 2048,
+        zoom: 0.5,
+        offsetX: 0,
+        offsetY: 0,
+        // checkCanvasCoverage: false (default)
+      );
+      expect(a.level, CoverQualityLevel.ok);
+    });
+
+    test('coverage check default is OFF (genre is the common case)', () {
+      // Sanity-check the default parameter — flipping it on a release
+      // would silently re-introduce the chip-spam regression on every
+      // genre slot.
+      final a = assessCoverQuality(
+        imageWidth: 1024,
+        imageHeight: 2048,
+        zoom: 0.5,
+        offsetX: 0,
+        offsetY: 0,
+      );
+      expect(a.level, CoverQualityLevel.ok,
+          reason: 'Without explicit opt-in, coverage must not trigger.');
     });
 
     test('hard upscale wins over soft coverage warn (most-severe rule)', () {
@@ -233,6 +264,7 @@ void main() {
         zoom: 1.0,
         offsetX: 0,
         offsetY: 0,
+        checkCanvasCoverage: true,
       );
       expect(a.level, CoverQualityLevel.hardWarn);
       expect(a.reason, contains('×'));

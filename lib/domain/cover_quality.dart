@@ -93,6 +93,15 @@ const double _kCoverageHard = 0.80; // > 20 % black — clearly broken
 ///
 /// Most-severe condition wins (hard > soft > ok).  Reason string is what
 /// the chip displays; keep it ≤ 30 chars.
+///
+/// [checkCanvasCoverage] is true for NR slots (the entire 1024×2048
+/// canvas is visible in-game, so any black gutter is a real defect)
+/// and false for genre slots (the layout-specific visible rect is a
+/// strict subset of the canvas; Fit-Visible deliberately leaves the
+/// hidden zones outside the visible rect black, which would otherwise
+/// register as ~10–25 % "empty canvas" and chip-spam every properly
+/// fitted cover).  Defaults to false — coverage is the surprising
+/// branch, callers must opt in.
 CoverQualityAssessment assessCoverQuality({
   required int imageWidth,
   required int imageHeight,
@@ -101,6 +110,7 @@ CoverQualityAssessment assessCoverQuality({
   required int offsetY,
   int canvasWidth = kTextureBkgWidth,
   int canvasHeight = kTextureBkgHeight,
+  bool checkCanvasCoverage = false,
 }) {
   if (imageWidth <= 0 || imageHeight <= 0) return CoverQualityAssessment.ok;
 
@@ -111,15 +121,17 @@ CoverQualityAssessment assessCoverQuality({
     canvasWidth: canvasWidth,
     canvasHeight: canvasHeight,
   );
-  final coverage = canvasCoverage(
-    imageWidth: imageWidth,
-    imageHeight: imageHeight,
-    zoom: zoom,
-    offsetX: offsetX,
-    offsetY: offsetY,
-    canvasWidth: canvasWidth,
-    canvasHeight: canvasHeight,
-  );
+  final coverage = checkCanvasCoverage
+      ? canvasCoverage(
+          imageWidth: imageWidth,
+          imageHeight: imageHeight,
+          zoom: zoom,
+          offsetX: offsetX,
+          offsetY: offsetY,
+          canvasWidth: canvasWidth,
+          canvasHeight: canvasHeight,
+        )
+      : 1.0; // skip-coverage sentinel — always "fully covered"
 
   // Hard-warn first — either condition alone is enough.
   if (scale >= _kUpscaleHard) {
