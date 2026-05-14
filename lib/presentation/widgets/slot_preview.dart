@@ -743,9 +743,14 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
     final coverArea = Center(
       child: AspectRatio(
         aspectRatio: 1024 / 2048,
+        // No clip here — the cropper has its own ClipRect around the
+        // cover image, and the T_Layout overlay needs to paint past
+        // these bounds (sibling inside the cropper's viewport
+        // Transform).  Z-order is contained by the parent Column's
+        // ClipRect around the cover-area cell.
         child: Container(
           decoration: frameDeco,
-          clipBehavior: Clip.antiAlias,
+          clipBehavior: Clip.none,
           child: cropperOrPlaceholder(),
         ),
       ),
@@ -800,7 +805,14 @@ class _CoverEditorBlockState extends ConsumerState<_CoverEditorBlock> {
 
     return Column(
       children: [
-        Expanded(child: coverWithLabels),
+        // ClipRect contains the T_Layout cassette-body overlay to the
+        // cover-area cell so it can't paint over the info row, crop
+        // bar, or status strip below.  The cropper's own clipping
+        // around the cover image is unchanged — this only bounds the
+        // layout-texture's bleed.
+        Expanded(
+          child: ClipRect(child: coverWithLabels),
+        ),
         const SizedBox(height: kSp1),
         // Filename + resolution under the cover, plus the quality-warning
         // chip (briefing §6.3 + §10.2 — small chip near the canvas when

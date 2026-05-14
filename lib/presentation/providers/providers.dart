@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +18,7 @@ import '../../data/repositories/config_repository_impl.dart';
 import '../../data/repositories/pak_builder_impl.dart';
 import '../../data/repositories/texture_repository_impl.dart';
 import '../../data/services/cover_actions.dart';
+import '../../data/services/layout_overlay_loader.dart';
 import '../../data/services/layout_preloader.dart';
 import '../../data/services/pak_cache.dart';
 import '../../domain/custom_slot_naming.dart';
@@ -110,6 +112,17 @@ final layoutPreloadProvider =
   final config = await ref.watch(configFutureProvider.future);
   final cache = ref.watch(pakCacheProvider);
   return preloadLayoutTextures(cache, config);
+});
+
+/// Alpha-masked `ui.Image` of `T_Layout_NN_bc_full.png` for layout `n`.
+/// Lazy + per-layout cached.  Powers the "Layout Overlay" toggle on the
+/// cropper canvas (RR_VHS_Tool.py:12805-12884).  Returns `null` when the
+/// texture is unavailable — callers degrade to hatch + dashed border.
+final layoutOverlayImageProvider =
+    FutureProvider.family<ui.Image?, int>((ref, n) async {
+  final config = await ref.watch(configFutureProvider.future);
+  final cache = ref.watch(pakCacheProvider);
+  return loadLayoutOverlayImage(cache, config, n);
 });
 
 final texturesProvider = Provider<List<Texture>>((ref) {

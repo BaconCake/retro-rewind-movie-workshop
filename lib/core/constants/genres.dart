@@ -198,6 +198,54 @@ LayoutVisibleRect? layoutVisibleRect(int layoutN) {
   );
 }
 
+/// Placement of the 2048×2048 `T_Layout_NN_bc_full.png` overlay inside
+/// the bg-texture (1024×2048) coordinate frame.  Pure port of the
+/// position math at RR_VHS_Tool.py:12822-12842 — the same numbers
+/// `layoutVisibleRect` derives from internally, exposed here so the
+/// preview painter can place the texture without re-deriving them.
+///
+/// `lox`/`loy` is the top-left of the layout texture in bg-pixel coords;
+/// `scaledSize` is the texture's edge length in bg-pixel coords
+/// (= 2048 × lscale).  Both nudges are already applied.
+///
+/// To get on-screen pixels, multiply each value by
+/// `canvasWidth / kTextureBkgWidth`.
+class LayoutOverlayPlacement {
+  final double lox;
+  final double loy;
+  final double scaledSize;
+  const LayoutOverlayPlacement({
+    required this.lox,
+    required this.loy,
+    required this.scaledSize,
+  });
+}
+
+LayoutOverlayPlacement? layoutOverlayPlacement(int layoutN) {
+  if (layoutN < 1 || layoutN > 5) return null;
+  final lf = kLayoutFit[layoutN]!;
+  final lw = kLayoutWindows[layoutN]!;
+  final bgTop = lf.fitTop.toDouble();
+  final bgBot = (kTextureBkgHeight - lf.fitBottomHidden).toDouble();
+  final lscale = (bgBot - bgTop) / (lw.bottom - lw.top);
+
+  final loy = bgTop - lw.top * lscale + (kLayoutOvlNudgeY[layoutN] ?? 0);
+  final windowW = (lw.right - lw.left) * lscale;
+  final double lox0;
+  if (windowW > kTextureBkgWidth) {
+    final leftAlign = (layoutN == 4) ? 0 : kHiddenLeft;
+    lox0 = leftAlign - lw.left * lscale;
+  } else {
+    lox0 = kTextureBkgWidth - lw.right * lscale;
+  }
+  final lox = lox0 + (kLayoutOvlNudgeX[layoutN] ?? 0);
+  return LayoutOverlayPlacement(
+    lox: lox,
+    loy: loy,
+    scaledSize: 2048 * lscale,
+  );
+}
+
 /// Slice 1 build version string emitted in the build log.
 /// Python tool version is v1.8.2; the Flutter port carries its own line
 /// until feature parity (see MIGRATION.md).

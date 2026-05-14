@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -332,6 +333,12 @@ class _CroppingPreviewState extends State<CroppingPreview> {
         // remains anchored to the cropper frame.
         return Stack(
           fit: StackFit.expand,
+          // Clip.none lets the T_Layout cassette-body overlay paint past
+          // the cover-box bounds (sq ≈ 2.5× the cover width).  The HUD
+          // buttons stay positioned via `Positioned` and are bounded by
+          // their own coords, so this doesn't free them to draw outside
+          // the cropper either.
+          clipBehavior: Clip.none,
           children: [
             Listener(
               onPointerSignal: (e) => _onScroll(e, size),
@@ -346,54 +353,98 @@ class _CroppingPreviewState extends State<CroppingPreview> {
                   onPanStart: _onPanStart,
                   onPanUpdate: (d) => _onPanUpdate(d, size),
                   onPanEnd: _onPanEnd,
-                  child: ClipRect(
-                    child: Transform(
-                      alignment: Alignment.center,
-                      transform: Matrix4.identity()
-                        ..translateByDouble(_vpanX, _vpanY, 0, 1)
-                        ..scaleByDouble(_vzoom, _vzoom, 1, 1),
-                      child: buildCoverImageStack(
-                        file: widget.file,
-                        imageWidth: widget.imageWidth,
-                        imageHeight: widget.imageHeight,
-                        offsetX: _x,
-                        offsetY: _y,
-                        zoom: _zoom,
-                        imageGeneration: widget.imageGeneration,
-                        size: size,
-                        // Cap cacheWidth at moderate zoom — avoids a huge
-                        // decode at vz=4 while staying sharp through 2×.
-                        cacheWidthMultiplier: 4.0,
-                        overlay: IgnorePointer(
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              // Red hidden zones + cyan visible-area
-                              // outline — always drawn on genre slots,
-                              // never on NR slots (NRs use the full
-                              // canvas and have their own zone overlay
-                              // below).
-                              if (widget.nrShape == null)
-                                CustomPaint(
-                                  size: size,
-                                  painter: SafeAreaOverlayPainter(
-                                    layout: widget.layout,
-                                    centerSnapX: _centerSnapX,
-                                    centerSnapY: _centerSnapY,
-                                  ),
-                                ),
-                              if (widget.nrShape != null)
-                                CustomPaint(
-                                  size: size,
-                                  painter: _NrZoneOverlayPainter(
-                                    shape: widget.nrShape!,
-                                    standeeMode: widget.standeeMode,
-                                  ),
-                                ),
-                            ],
+                  // Transform on the OUTSIDE so cover + safe-overlay +
+                  // T_Layout overlay all share the same viewport zoom
+                  // and middle-mouse pan.  The inner Stack uses
+                  // `Clip.none` so the layout texture can paint past
+                  // the cover-box clip; the cover image itself sits in
+                  // its own `ClipRect` so left-mouse drag still clips.
+                  child: Transform(
+                    alignment: Alignment.center,
+                    transform: Matrix4.identity()
+                      ..translateByDouble(_vpanX, _vpanY, 0, 1)
+                      ..scaleByDouble(_vzoom, _vzoom, 1, 1),
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      fit: StackFit.expand,
+                      children: [
+                        ClipRect(
+                          child: buildCoverImageStack(
+                            file: widget.file,
+                            imageWidth: widget.imageWidth,
+                            imageHeight: widget.imageHeight,
+                            offsetX: _x,
+                            offsetY: _y,
+                            zoom: _zoom,
+                            imageGeneration: widget.imageGeneration,
+                            size: size,
+                            // Cap cacheWidth at moderate zoom — avoids
+                            // a huge decode at vz=4 while staying sharp
+                            // through 2×.
+                            cacheWidthMultiplier: 4.0,
+                            overlay: IgnorePointer(
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  // Red hidden zones + cyan visible-area
+                                  // outline — always drawn on genre slots,
+                                  // never on NR slots (NRs use the full
+                                  // canvas and have their own zone overlay
+                                  // below).
+                                  if (widget.nrShape == null)
+                                    CustomPaint(
+                                      size: size,
+                                      painter: SafeAreaOverlayPainter(
+                                        layout: widget.layout,
+                                        centerSnapX: _centerSnapX,
+                                        centerSnapY: _centerSnapY,
+                                        showLayoutOverlay: widget.showOverlay,
+                                      ),
+                                    ),
+                                  if (widget.nrShape != null)
+                                    CustomPaint(
+                                      size: size,
+                                      painter: _NrZoneOverlayPainter(
+                                        shape: widget.nrShape!,
+                                        standeeMode: widget.standeeMode,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
-                      ),
+                        // T_Layout cassette-body texture — sibling of
+                        // the ClipRect-wrapped cover so it can paint
+                        // outside the cover bounds, but inside the
+                        // viewport Transform so middle-mouse pan +
+                        // wheel-zoom move it together with the cover.
+                        if (widget.showOverlay &&
+                            widget.layout >= 1 &&
+                            widget.layout <= 5 &&
+                            widget.nrShape == null)
+                          Positioned.fill(
+                            child: Consumer(
+                              builder: (context, ref, _) {
+                                final imgAsync = ref.watch(
+                                    layoutOverlayImageProvider(
+                                        widget.layout));
+                                final image = imgAsync.asData?.value;
+                                if (image == null) {
+                                  return const SizedBox.shrink();
+                                }
+                                return IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: LayoutOverlayPainter(
+                                      image: image,
+                                      layout: widget.layout,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ),
@@ -425,10 +476,16 @@ class SafeAreaOverlayPainter extends CustomPainter {
   final int layout;
   final bool centerSnapX;
   final bool centerSnapY;
+  /// When true, the layout-texture overlay is being composited on top of
+  /// this painter — suppress the cyan dashed border since the texture
+  /// itself delineates the visible area (Python parity,
+  /// RR_VHS_Tool.py:13200-13204).  Hatched zones still render.
+  final bool showLayoutOverlay;
   const SafeAreaOverlayPainter({
     required this.layout,
     this.centerSnapX = false,
     this.centerSnapY = false,
+    this.showLayoutOverlay = false,
   });
 
   // Match Python's hatch palette (RR_VHS_Tool.py:12462-12467, 12525).
@@ -481,14 +538,11 @@ class SafeAreaOverlayPainter extends CustomPainter {
       _paintHatchedZone(canvas, z);
     }
 
-    // Cyan dashed visible-area border — also always drawn.  Once the
-    // T_Layout texture overlay lands (separate slice), this will be
-    // gated by `!showOverlay` to match Python (`_draw_safe_border_on_
-    // canvas` at RR_VHS_Tool.py:13200-13204 suppresses the cyan when
-    // the layout texture is composited, since the texture itself
-    // delineates the visible area).  Until then, keep both visible
-    // since the toggle is currently a no-op.
-    if (borderRect.width > 0 && borderRect.height > 0) {
+    // Cyan dashed visible-area border — suppressed when the T_Layout
+    // texture overlay is composited on top (Python parity at
+    // RR_VHS_Tool.py:13200-13204).  The texture itself delineates the
+    // visible area, so the dashed border would only add clutter.
+    if (!showLayoutOverlay && borderRect.width > 0 && borderRect.height > 0) {
       _paintDashedRect(canvas, borderRect);
     }
 
@@ -619,7 +673,106 @@ class SafeAreaOverlayPainter extends CustomPainter {
   bool shouldRepaint(SafeAreaOverlayPainter old) =>
       old.layout != layout ||
       old.centerSnapX != centerSnapX ||
-      old.centerSnapY != centerSnapY;
+      old.centerSnapY != centerSnapY ||
+      old.showLayoutOverlay != showLayoutOverlay;
+}
+
+/// Composites the alpha-masked `T_Layout_NN_bc_full.png` cassette body
+/// over the cropper canvas so the user sees the in-game VHS frame
+/// wrapping their cover.  Pure port of RR_VHS_Tool.py:12805-12884.
+///
+/// Math (per Python lines 12822-12847):
+/// ```
+///   bg_top  = fit_top
+///   bg_bot  = TEX_HEIGHT - fit_bottom_hidden
+///   lscale  = (bg_bot - bg_top) / (window.bottom - window.top)
+///   loy     = bg_top - window.top * lscale  +  nudge_y
+///   if window_w > TEX_WIDTH: lox = (L4?0:HIDDEN_LEFT) - window.left * lscale
+///   else:                    lox = TEX_WIDTH - window.right * lscale
+///   lox += nudge_x
+///   sq      = 2048 * lscale * (canvas.width / TEX_WIDTH)
+///   (lx, ly) = (lox, loy) * canvas.width / TEX_WIDTH
+/// ```
+/// In our painter coordinate frame the cropper canvas is at `(0,0)` so
+/// Python's `_real_dx/_real_dy` drop out.
+///
+/// Drawing order (Python lines 12860-12883):
+///   1. Dark `#1a1a1a` fills in the four bands of the overlay square
+///      that fall **outside** the bg canvas — these stop the transparent
+///      window from showing whatever lies beyond the cover when the
+///      texture extends past the canvas edge.
+///   2. The alpha-masked texture itself, scaled `sq×sq` at `(lx, ly)`.
+///
+/// The [image] is the full 2048×2048 RGBA texture; Flutter resamples
+/// at draw time so we cache exactly one `ui.Image` per layout regardless
+/// of viewport zoom.
+class LayoutOverlayPainter extends CustomPainter {
+  final ui.Image image;
+  final int layout;
+  const LayoutOverlayPainter({required this.image, required this.layout});
+
+  static const Color _darkFill = Color(0xFF1A1A1A);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+    final placement = layoutOverlayPlacement(layout);
+    if (placement == null) return;
+
+    final texToScreen = size.width / kTextureBkgWidth;
+    final sq = placement.scaledSize * texToScreen;
+    final lx = placement.lox * texToScreen;
+    final ly = placement.loy * texToScreen;
+
+    // Dark fills in the parts of the overlay square that fall outside
+    // the cropper canvas — stops the transparent "window" from showing
+    // whatever sits behind the cropper through those gaps.
+    final fillPaint = Paint()..color = _darkFill;
+    if (lx < 0) {
+      canvas.drawRect(Rect.fromLTRB(lx, ly, 0, ly + sq), fillPaint);
+    }
+    if (lx + sq > size.width) {
+      canvas.drawRect(
+        Rect.fromLTRB(size.width, ly, lx + sq, ly + sq),
+        fillPaint,
+      );
+    }
+    if (ly < 0) {
+      canvas.drawRect(
+        Rect.fromLTRB(
+          lx < 0 ? 0 : lx,
+          ly,
+          lx + sq > size.width ? size.width : lx + sq,
+          0,
+        ),
+        fillPaint,
+      );
+    }
+    if (ly + sq > size.height) {
+      canvas.drawRect(
+        Rect.fromLTRB(
+          lx < 0 ? 0 : lx,
+          size.height,
+          lx + sq > size.width ? size.width : lx + sq,
+          ly + sq,
+        ),
+        fillPaint,
+      );
+    }
+
+    final src = Rect.fromLTWH(
+      0,
+      0,
+      image.width.toDouble(),
+      image.height.toDouble(),
+    );
+    final dst = Rect.fromLTWH(lx, ly, sq, sq);
+    canvas.drawImageRect(image, src, dst, Paint());
+  }
+
+  @override
+  bool shouldRepaint(LayoutOverlayPainter old) =>
+      !identical(old.image, image) || old.layout != layout;
 }
 
 /// Paints the NR standee zone overlay on top of the cover.
