@@ -251,6 +251,17 @@ LayoutOverlayPlacement? layoutOverlayPlacement(int layoutN) {
 /// until feature parity (see MIGRATION.md).
 const String kFlutterBuildVersion = 'v0.1.0-flutter';
 
+/// PakCache extract-dir stamp. When this string changes, the cache is wiped
+/// on next launch so users get fresh UASSET extractions instead of the
+/// possibly-broken ones a previous tool version left behind.  Pure port of
+/// `TOOL_VERSION` + `_invalidate_stale_cache` (RR_VHS_Tool.py:494, 5644-5666).
+///
+/// **Bump this** whenever asset-rebuild logic (texture_cloner,
+/// uasset_rebuilder, anything that writes bytes into `.pak_cache/`) changes,
+/// even if pubspec `version` doesn't move.  The stamp is opaque — value
+/// shape doesn't matter, only its identity.
+const String kPakCacheStampVersion = 'v1.8.2.2-flutter';
+
 /// Output pak filename. The leading "zzzzzz_" sorts after RetroRewind-Windows.pak
 /// so our overrides win at load time (RR_VHS_Tool.py:23-24).
 const String kOutputPakFilename = 'zzzzzz_MovieWorkshop_P.pak';

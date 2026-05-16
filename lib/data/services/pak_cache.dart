@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 
+import '../../core/constants/genres.dart';
 import '../../domain/entities/app_config.dart';
 import 'dxt1_decoder.dart';
 
@@ -48,6 +49,62 @@ class PakCache {
   /// [getLayoutTextureFull].
   String get layoutCacheDir => p.join(workingDir, 'layout_cache');
 
+  /// `.pak_cache/.tool_version` — stamps which tool version produced the
+  /// cached UASSETS so we can wipe across version bumps that fix
+  /// asset-rebuild logic.  Pure port of `_stamp_path`
+  /// (RR_VHS_Tool.py:5641).
+  String get _stampPath => p.join(extractDir, '.tool_version');
+
+  Future<void>? _stampValidationFuture;
+
+  /// Wipe the extract dir if `.tool_version` is missing or doesn't match
+  /// [kPakCacheStampVersion], then write the current stamp.  Idempotent per
+  /// instance — concurrent callers await the same future.  Pure port of
+  /// `_invalidate_stale_cache` (RR_VHS_Tool.py:5644-5666).
+  ///
+  /// Called automatically by [extractFile], [extractFolder], and the layout
+  /// texture path before any cache lookup.  The layout PNG cache
+  /// (`<workingDir>/layout_cache/`) is intentionally NOT wiped — it lives
+  /// outside `extractDir` and contains pure DXT1-decoded textures unaffected
+  /// by asset-rebuild logic, matching Python's behaviour.
+  Future<void> _ensureStampValid() {
+    return _stampValidationFuture ??= _validateStamp();
+  }
+
+  Future<void> _validateStamp() async {
+    final stampFile = File(_stampPath);
+    String? stamp;
+    if (await stampFile.exists()) {
+      try {
+        stamp = (await stampFile.readAsString()).trim();
+      } catch (_) {
+        stamp = null;
+      }
+    }
+    if (stamp == kPakCacheStampVersion) return;
+
+    final extractDirHandle = Directory(extractDir);
+    if (await extractDirHandle.exists()) {
+      final hasContent = !(await extractDirHandle.list().isEmpty);
+      if (hasContent) {
+        try {
+          await extractDirHandle.delete(recursive: true);
+        } catch (_) {
+          // Best effort: if a file is locked we keep the stale cache rather
+          // than fail the build. Matches Python's "return on rmtree error"
+          // (RR_VHS_Tool.py:5658-5660).
+          return;
+        }
+      }
+    }
+    await Directory(extractDir).create(recursive: true);
+    try {
+      await stampFile.writeAsString(kPakCacheStampVersion);
+    } catch (_) {
+      // Stamp write failure is non-fatal — we'll retry on next launch.
+    }
+  }
+
   String _cachedPathFor(String internalPath) =>
       p.join(extractDir, internalPath.replaceAll('/', p.separator));
 
@@ -59,6 +116,8 @@ class PakCache {
       AppConfig config, String internalPath) async {
     final pre = _checkConfig(config);
     if (pre != null) return pre;
+
+    await _ensureStampValid();
 
     final cachedPath = _cachedPathFor(internalPath);
     final cachedFile = File(cachedPath);
@@ -109,6 +168,8 @@ class PakCache {
       AppConfig config, String internalPrefix) async {
     final pre = _checkConfig(config);
     if (pre != null) return pre;
+
+    await _ensureStampValid();
 
     // Normalise: repak wants forward slashes and a trailing slash on folders.
     final normalised = internalPrefix.endsWith('/')
