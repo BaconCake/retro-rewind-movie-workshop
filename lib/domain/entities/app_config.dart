@@ -56,6 +56,25 @@ class AppConfig {
   bool get hasRepak => repak.isNotEmpty;
   bool get hasModsFolder => modsFolder.isNotEmpty;
 
+  /// Clear paths whose targets no longer exist on disk — defensive against
+  /// `config.json` copied between machines or after a game/tool reinstall.
+  /// Pure port of Python's `load_config` post-read clean
+  /// (RR_VHS_Tool.py:2715-2719).
+  ///
+  /// File-typed fields (texconv/repak/baseGamePak) clear when no file
+  /// exists at the path; directory-typed `modsFolder` clears when no
+  /// directory exists.  Empty fields are passed through unchanged.
+  AppConfig withClearedStalePaths() {
+    return AppConfig(
+      texconv: texconv.isEmpty || _fileExists(texconv) ? texconv : '',
+      repak: repak.isEmpty || _fileExists(repak) ? repak : '',
+      baseGamePak:
+          baseGamePak.isEmpty || _fileExists(baseGamePak) ? baseGamePak : '',
+      modsFolder:
+          modsFolder.isEmpty || _dirExists(modsFolder) ? modsFolder : '',
+    );
+  }
+
   /// True when every required path is set, points at a real file/dir, AND
   /// the tool/pak fields carry the expected basename (so a swapped
   /// texconv↔repak entry doesn't silently pass).  Drives the launch-time
