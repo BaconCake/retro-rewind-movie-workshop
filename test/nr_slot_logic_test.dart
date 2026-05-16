@@ -47,22 +47,26 @@ void main() {
     });
   });
 
-  group('addNrSlot — tex_num assignment (Python v1.8.2 reuse-after-delete fix)', () {
+  group('addNrSlot — tex_num assignment (A3 — Python range(1, 1000))', () {
     test('Drama (newCount=3) first slot → tex_num=1', () {
       final r = addNrSlot(genre: 'Drama', existing: const [], random: Random(0));
       expect(r.slot!.texNum, 1);
       expect(r.slot!.bkgTex, 'T_New_Dra_001');
     });
 
-    test('Drama: 1,2,3 in use → next is shared (count-mod cycles 1)', () {
-      // All base slots used → fall back to (count % slot_count) + 1 = (3 % 3) + 1 = 1
+    test('Drama: 1,2,3 in use → next is 4 (no modulo-recycle)', () {
+      // Pre-A3 fix: Dart picked (3 % 3) + 1 = 1 (duplicate).  After A3:
+      // search continues past base_new_count up to kNrPerGenreCap and finds
+      // tex_num=4 — slots beyond the base count get auto-cloned at build
+      // via writeNrDonorClone.  Matches Python's range(1, 1000) at Z. 2133.
       final existing = [
         _slot(genre: 'Drama', texNum: 1, sku: 50000),
         _slot(genre: 'Drama', texNum: 2, sku: 50001),
         _slot(genre: 'Drama', texNum: 3, sku: 50002),
       ];
       final r = addNrSlot(genre: 'Drama', existing: existing, random: Random(0));
-      expect(r.slot!.texNum, 1);
+      expect(r.slot!.texNum, 4);
+      expect(r.slot!.bkgTex, 'T_New_Dra_004');
     });
 
     test('Drama: 1,3 in use → next picks 2 (lowest unused)', () {
@@ -72,13 +76,10 @@ void main() {
       ];
       final r = addNrSlot(genre: 'Drama', existing: existing, random: Random(0));
       expect(r.slot!.texNum, 2,
-          reason: 'reuse-after-delete fix: lowest unused base slot wins');
+          reason: 'reuse-after-delete fix: lowest unused slot wins');
     });
 
-    test('Drama: delete-then-add reuses freed tex_num (the v1.8.2 bug fix)', () {
-      // Pre-bug: after deleting NR with tex_num=1, adding a new one would
-      // pick (count % slot_count) + 1 = (2 % 3) + 1 = 3, colliding with the
-      // still-existing tex_num=3. Fixed: pick lowest unused = 1.
+    test('Drama: delete-then-add reuses freed tex_num', () {
       final afterDelete = [
         _slot(genre: 'Drama', texNum: 2, sku: 50001),
         _slot(genre: 'Drama', texNum: 3, sku: 50002),
@@ -87,12 +88,24 @@ void main() {
       expect(r.slot!.texNum, 1);
     });
 
-    test('Genre with newCount=0 (Romance) still gets tex_num=1', () {
-      // Romance ships no T_New textures but Python still allows the slot —
-      // build_newrelease_datatable filters it later. tex_num floor of 1.
+    test('Romance (newCount=0) still gets tex_num=1', () {
+      // Romance ships no T_New textures but Python still allocates a
+      // tex_num (Z. 9877 has no base-count guard).  build_newrelease_data-
+      // table filters Romance/Western rows at build time.
       final r = addNrSlot(genre: 'Romance', existing: const [], random: Random(0));
       expect(r.slot!.texNum, 1);
       expect(r.slot!.bkgTex, 'T_New_Rom_001');
+    });
+
+    test('Drama with 50 NRs already → next is 51 (no modulo wrap)', () {
+      // Regression for the A3 modulo bug: with 50 NRs in Drama, the old
+      // code would pick (50 % 3) + 1 = 3 — a duplicate.  After A3: 51.
+      final existing = [
+        for (var i = 1; i <= 50; i++)
+          _slot(genre: 'Drama', texNum: i, sku: 50000 + i),
+      ];
+      final r = addNrSlot(genre: 'Drama', existing: existing, random: Random(0));
+      expect(r.slot!.texNum, 51);
     });
   });
 
@@ -233,7 +246,7 @@ void main() {
         newGenre: 'Drama',
         allSlots: [s, other],
       );
-      // tex_num=1 is used by other; lowest unused for Drama (newCount=3) is 2.
+      // tex_num=1 is used by other; lowest unused is 2.
       expect(next!.texNum, 2);
     });
 
@@ -250,10 +263,11 @@ void main() {
       expect(next!.texNum, 3);
     });
 
-    test('wraps via count-mod when every base slot in target genre is used',
-        () {
+    test('continues past newCount when every base slot is used (A3)', () {
       // Horror has newCount=4. Fill 1..4 with other slots, then move our
-      // slot to Horror — should wrap to (4 % 4) + 1 = 1.
+      // slot to Horror.  Pre-A3: wraps to (4 % 4) + 1 = 1 (duplicate).
+      // After A3: matches Python's range(1, 1000) and picks 5 — the slot
+      // gets cloned from T_New_Hor_01 at build time via writeNrDonorClone.
       final s = _slot(genre: 'Drama', texNum: 1, sku: 50001);
       final fillers = [
         for (var i = 0; i < 4; i++)
@@ -264,12 +278,16 @@ void main() {
         newGenre: 'Horror',
         allSlots: [s, ...fillers],
       );
-      expect(next!.texNum, 1);
+      expect(next!.texNum, 5);
+      expect(next.bkgTex, 'T_New_Hor_005');
     });
 
-    test('keeps texNum/bkgTex when target genre has newCount=0', () {
-      // Romance has no T_New textures; Python returns early without
-      // touching tex_num/bkg_tex (Z. 9237-9238). We do the same.
+    test('still assigns texNum/bkgTex when target genre has newCount=0', () {
+      // Romance has no T_New textures.  Python's `_on_nr_genre_change`
+      // (RR_VHS_Tool.py:9861-9881) sets tex_num and bkg_tex unconditionally
+      // — the DT builder filters Romance/Western rows out at build time.
+      // Pre-A3, Dart short-circuited and left tex_num at 2; matching
+      // Python is the right behaviour.
       final s = _slot(genre: 'Drama', texNum: 2, sku: 50001);
       final next = changeNrSlotGenre(
         slot: s,
@@ -279,10 +297,9 @@ void main() {
       expect(next!.genre, 'Romance');
       expect(next.genreCode, 'Rom');
       expect(next.genreByte, kNrGenreByte['Romance']);
-      expect(next.texNum, 2);
-      expect(next.bkgTex, s.bkgTex,
-          reason: 'no T_New textures → DT builder will drop this slot, '
-              'so changing the bkg_tex preview would be misleading');
+      expect(next.texNum, 1,
+          reason: 'Romance has no other NRs in test scope → lowest unused = 1');
+      expect(next.bkgTex, 'T_New_Rom_001');
     });
   });
 

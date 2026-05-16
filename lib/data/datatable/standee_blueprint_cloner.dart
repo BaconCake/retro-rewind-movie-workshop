@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../../core/constants/new_release.dart';
 import '../../domain/entities/app_config.dart';
 import '../services/pak_cache.dart';
 import '../services/uasset_rebuilder.dart';
@@ -72,7 +73,7 @@ class StandeeBlueprintCloner {
   /// any length mismatch on the same-length axes (SKU 5 digits, shape 1
   /// char, genre code 3 chars) throws because patches that need same-
   /// length input would otherwise silently corrupt the asset.  texNum is
-  /// capped at 99 (3-digit padding).
+  /// capped at [kNrPerGenreCap] (3-digit padding fits 1..999).
   Future<StandeeBlueprintCloneResult> clone({
     required AppConfig config,
     required int sku,
@@ -93,9 +94,10 @@ class StandeeBlueprintCloner {
       throw StandeeBlueprintCloneError(
           'E004', 'genre code length mismatch: "$genreCode"');
     }
-    if (texNum < 1 || texNum > 99) {
+    if (texNum < 1 || texNum > kNrPerGenreCap) {
       throw StandeeBlueprintCloneError(
-          'E004', 'tex_num $texNum out of 3-digit range (1..99)');
+          'E004',
+          'tex_num $texNum out of 3-digit range (1..$kNrPerGenreCap)');
     }
 
     // Extract base template via PakCache.

@@ -37,12 +37,16 @@ List<String> get kNrGenres => kNrGenreByte.keys.toList(growable: false);
 /// in-game standee mesh (`LA_Standee_<shape>_01`) — Python Z. 2003.
 const List<String> kNrStandeeShapes = ['A', 'B', 'C'];
 
-/// Soft cap of 99 NRs per genre.  Above this, the bkg_tex format
-/// `T_New_<code>_<NN>` widens from 12 to 13 chars (e.g. `T_New_Dra_100`),
-/// changing the BackgroundImage FString length in the DataTable row by 1
-/// byte and breaking the fixed 54-byte row layout.  3-digit support is
-/// feasible but parked — Python Z. 2077-2083.
-const int kNrPerGenreCap = 99;
+/// Soft cap of 999 NRs per genre.  Matches Python's `range(1, 1000)` slot
+/// search (RR_VHS_Tool.py:2133, 9877).  The 3-digit zero-padded format
+/// (`T_New_Dra_001`..`T_New_Dra_999`) is always 13 chars, so the
+/// BackgroundImage FString length stays constant across the whole range
+/// and the DataTable row layout stays at 55 bytes.
+///
+/// Note: the legacy 2-digit co-inject path (`_writeNrLegacyCoInject` in
+/// pak_builder_impl.dart) still skips `texNum > 99` because the 2-digit
+/// FName `T_New_Dra_NN` widens at 100.  That's per-path, not a global cap.
+const int kNrPerGenreCap = 999;
 
 /// SKU range for New Releases — Python Z. 2127.  Distinct from base-game
 /// SKUs (which use other ranges per genre) so NR slots don't collide with

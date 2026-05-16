@@ -40,14 +40,14 @@ enum AddNrError {
 /// slot wrapped in an [AddNrResult].  Pure — caller decides whether to
 /// persist.  [now] and [random] are injected so tests can pin them.
 ///
-/// Behavior matches Python `add_nr_slot` (Z. 2070-2145):
+/// Behavior matches Python `add_nr_slot` (RR_VHS_Tool.py:2115-2155):
 ///   * Reject genres not in [kNrGenreByte].
 ///   * Reject when this genre is already at [kNrPerGenreCap].
-///   * Pick the **lowest unused** tex_num in 1..base_new_count for the
-///     genre.  Only when all base slots are in use, fall back to
-///     `(count % slot_count) + 1` to share a texture (Python's
-///     bug-fixed v1.8.2 behavior — the previous formula assigned
-///     already-used tex_nums after a deletion).
+///   * Pick the **lowest unused** tex_num in `1..kNrPerGenreCap` for
+///     the genre (Python's `range(1, 1000)`, Z. 2133).  Unlike base
+///     game slot picks, this is not bounded by `genreInfo.newCount` —
+///     slots beyond the base count get cloned at build time via the
+///     T_New_Hor_01 donor (see `writeNrDonorClone`).
 ///   * SKU = uniform random in [kNrSkuMin]..[kNrSkuMax], retried until
 ///     unused across all NR slots (cross-genre uniqueness).
 AddNrResult addNrSlot({
@@ -68,20 +68,22 @@ AddNrResult addNrSlot({
 
   final genreInfo = kGenres.firstWhere((g) => g.name == genre);
   final code = genreInfo.code;
-  final slotCount = max(genreInfo.newCount, 1);
 
-  // Lowest unused base slot first; fall back to count-mod-share.
+  // Lowest unused tex_num in 1..kNrPerGenreCap (Python's range(1, 1000),
+  // Z. 2133).  The early per-genre cap check above guarantees this loop
+  // finds a value — at most kNrPerGenreCap-1 entries are used, so the
+  // smallest free integer is always within range.
   final usedTexNums = {
     for (final s in existing.where((s) => s.genre == genre)) s.texNum,
   };
-  int? texNum;
-  for (var n = 1; n <= slotCount; n++) {
+  int? candidate;
+  for (var n = 1; n <= kNrPerGenreCap; n++) {
     if (!usedTexNums.contains(n)) {
-      texNum = n;
+      candidate = n;
       break;
     }
   }
-  texNum ??= (perGenreCount % slotCount) + 1;
+  final texNum = candidate!;  // Guaranteed by perGenreCount cap check above.
 
   final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(3, '0')}';
 
@@ -114,17 +116,19 @@ AddNrResult addNrSlot({
 
 /// Re-target [slot] at [newGenre], preserving its SKU but recomputing
 /// `genreCode`, `genreByte`, `texNum`, and `bkgTex`.  Pure port of
-/// Python's `_on_nr_genre_change` (RR_VHS_Tool.py:9224-9254).
+/// Python's `_on_nr_genre_change` (RR_VHS_Tool.py:9861-9881).
 ///
-/// `texNum` picks the lowest unused base slot for [newGenre] across
-/// [allSlots] **excluding** [slot] itself; if every base slot is in use,
-/// it wraps with `(count % base_new_count) + 1` so multiple NRs share a
-/// texture (matching the add-side behavior in [addNrSlot]).
+/// `texNum` picks the lowest unused tex_num for [newGenre] across
+/// [allSlots] **excluding** [slot] itself, in `1..kNrPerGenreCap`
+/// (Python's `range(1, 1000)`, Z. 9877).  No base-game cap, no
+/// modulo-recycle — slots beyond `newCount` get auto-cloned at build
+/// from the T_New_Hor_01 donor (see `writeNrDonorClone`).
 ///
 /// Returns null when [newGenre] isn't in [kNrGenreByte] — caller should
-/// reject the change.  When [newGenre] has `newCount == 0` (Romance,
-/// Western), the slot's genre/code/byte are updated but `texNum`/`bkgTex`
-/// are kept — Python's behavior for that edge case (Z. 9237-9238).
+/// reject the change.  For Romance/Western (`newCount == 0`) the slot
+/// gets a tex_num/bkg_tex like any other genre (Python sets them
+/// unconditionally, Z. 9877-9879); the DT builder filters those rows
+/// out at build time.
 NewReleaseSlot? changeNrSlotGenre({
   required NewReleaseSlot slot,
   required String newGenre,
@@ -135,32 +139,25 @@ NewReleaseSlot? changeNrSlotGenre({
 
   final genreInfo = kGenres.firstWhere((g) => g.name == newGenre);
   final code = genreInfo.code;
-  final baseNewCount = genreInfo.newCount;
 
-  // Python returns from _on_nr_genre_change before touching tex_num when
-  // base_new_count == 0 (Z. 9237-9238).  We mirror that — the slot keeps
-  // its old tex_num/bkg_tex, which the DT builder will then drop at build
-  // time (Romance/Western have no T_New textures).
-  if (baseNewCount == 0) {
-    return slot.copyWith(
-      genre: newGenre,
-      genreCode: code,
-      genreByte: genreByte,
-    );
-  }
-
+  // Lowest unused tex_num in 1..kNrPerGenreCap.  Mirrors addNrSlot.
+  // [slot] is excluded from the used set so re-selecting the slot's
+  // current genre is idempotent (the slot's own tex_num stays free).
   final usedTexNums = {
     for (final s in allSlots)
       if (s.sku != slot.sku && s.genre == newGenre) s.texNum,
   };
-  int? texNum;
-  for (var n = 1; n <= baseNewCount; n++) {
+  int? candidate;
+  for (var n = 1; n <= kNrPerGenreCap; n++) {
     if (!usedTexNums.contains(n)) {
-      texNum = n;
+      candidate = n;
       break;
     }
   }
-  texNum ??= (usedTexNums.length % baseNewCount) + 1;
+  // Guaranteed by per-genre cap invariant — even if every NR in the
+  // app moved to `newGenre`, at most kNrPerGenreCap-1 of them could
+  // share that genre minus this slot.
+  final texNum = candidate!;
 
   final bkgTex = 'T_New_${code}_${texNum.toString().padLeft(3, '0')}';
 

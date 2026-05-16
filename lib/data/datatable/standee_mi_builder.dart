@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../../core/constants/new_release.dart';
 import '../services/uasset_rebuilder.dart';
 import 'standee_templates.dart';
 
@@ -52,11 +53,9 @@ class StandeeMiBuilder {
   /// Build the MI uasset+uexp pair for a New Release.
   ///
   /// [genreCode] — 3-char code matching `T_Bkg_<code>` (e.g. "Dra", "Sci").
-  /// [texNum] — slot number (1..99 per [kNrPerGenreCap]).  Encoded as
-  /// 3-digit zero-padded.  100+ is intentionally rejected — Python's
-  /// `clone_texture_3digit` switches to a different FName encoding above
-  /// 99 (literal-name vs base-name + FName num); we don't need that path
-  /// since the UI caps NR count per genre at 99.
+  /// [texNum] — slot number (1..[kNrPerGenreCap], i.e. 1..999).  Encoded
+  /// as 3-digit zero-padded.  1000+ rejected because the dst FName would
+  /// widen to 4 digits and break the same-length patch axis.
   /// [standeeShape] — "A", "B", or "C".  Same-length always (1 char).
   StandeeMiBuildResult build({
     required String genreCode,
@@ -68,9 +67,9 @@ class StandeeMiBuilder {
           'genre code length mismatch: got "$genreCode" '
           '(${genreCode.length}), expected ${kMiTemplateGenre.length}');
     }
-    if (texNum < 1 || texNum > 99) {
+    if (texNum < 1 || texNum > kNrPerGenreCap) {
       throw StandeeMiBuildError(
-          'tex_num $texNum out of range — must be 1..99');
+          'tex_num $texNum out of range — must be 1..$kNrPerGenreCap');
     }
     if (standeeShape.length != kMiTemplateShape.length) {
       throw StandeeMiBuildError(

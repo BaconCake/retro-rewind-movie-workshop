@@ -671,8 +671,9 @@ class PakBuilderImpl implements PakBuilder {
       if (!kNrGenreByte.containsKey(s.genre)) continue;
       if (!replacements.containsKey(s.bkgTex)) continue;
       // Slots beyond the 2-digit format range (texNum > 99) would widen
-      // the BackgroundImage FString and break the row layout — skip.
-      // Per-genre cap is 99 in [kNrPerGenreCap] so this is defensive.
+      // the 2-digit FName and break the row layout in the LEGACY co-inject
+      // path.  The 3-digit primary path supports the full 1..kNrPerGenreCap
+      // range — only this legacy fallback is bounded at 99.
       if (s.texNum < 1 || s.texNum > 99) continue;
       eligible.add(s);
     }

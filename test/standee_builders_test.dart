@@ -114,14 +114,25 @@ void main() {
       );
     });
 
-    test('rejects out-of-range tex_num', () {
+    test('rejects out-of-range tex_num (A3 — cap raised to 999)', () {
+      // 1..kNrPerGenreCap (999) is now accepted; 1000+ rejected because
+      // padLeft(3, '0') only fits 3 digits.
       expect(
-        () => builder.build(genreCode: 'Dra', texNum: 100, standeeShape: 'A'),
+        () => builder.build(genreCode: 'Dra', texNum: 1000, standeeShape: 'A'),
         throwsA(isA<StandeeMiBuildError>()),
       );
       expect(
         () => builder.build(genreCode: 'Dra', texNum: 0, standeeShape: 'A'),
         throwsA(isA<StandeeMiBuildError>()),
+      );
+      // 100 and 999 are now valid — used to throw pre-A3.
+      expect(
+        () => builder.build(genreCode: 'Dra', texNum: 100, standeeShape: 'A'),
+        returnsNormally,
+      );
+      expect(
+        () => builder.build(genreCode: 'Dra', texNum: 999, standeeShape: 'A'),
+        returnsNormally,
       );
     });
 

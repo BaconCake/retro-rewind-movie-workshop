@@ -13,9 +13,9 @@ import '../providers/providers.dart';
 /// hidden — they have no base game T_New textures).  On select, calls
 /// [NrSlotsController.addSlot] and selects the new slot in the shelf.
 ///
-/// Per-genre cap (99) is enforced upstream by `addNrSlot` and surfaced as a
-/// SnackBar reading "X already has the maximum of 99 New Releases" so the
-/// user knows to delete one first or pick a different genre.
+/// Per-genre cap ([kNrPerGenreCap]) is enforced upstream by `addNrSlot` and
+/// surfaced as a SnackBar so the user knows to delete one first or pick a
+/// different genre.
 class AddNrSlotDialog extends ConsumerWidget {
   const AddNrSlotDialog({super.key});
 
