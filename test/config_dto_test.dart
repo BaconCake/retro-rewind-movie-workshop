@@ -55,5 +55,36 @@ void main() {
       ).toJson();
       expect(json.keys, containsAll(['texconv', 'repak', 'base_game_pak', 'mods_folder']));
     });
+
+    test('dev_mode round-trips through JSON (M2)', () {
+      const original = ConfigDto(
+        texconv: '',
+        repak: '',
+        baseGamePak: '',
+        modsFolder: '',
+        devMode: true,
+      );
+      final json = original.toJson();
+      expect(json['dev_mode'], isTrue);
+      final round = ConfigDto.fromJson(json);
+      expect(round.devMode, isTrue);
+    });
+
+    test('dev_mode defaults to false when missing from JSON (M2)', () {
+      final dto = ConfigDto.fromJson({});
+      expect(dto.devMode, isFalse);
+    });
+
+    test('dev_mode preserves through entity round-trip (M2)', () {
+      const dto = ConfigDto(
+        texconv: '',
+        repak: '',
+        baseGamePak: '',
+        modsFolder: '',
+        devMode: true,
+      );
+      final round = ConfigDto.fromEntity(dto.toEntity());
+      expect(round.devMode, isTrue);
+    });
   });
 }

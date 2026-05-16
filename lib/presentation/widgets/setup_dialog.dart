@@ -76,7 +76,8 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
     _repak = TextEditingController(text: widget.initial.repak);
     _basePak = TextEditingController(text: widget.initial.baseGamePak);
     _modsFolder = TextEditingController(text: widget.initial.modsFolder);
-    _devMode = false; // Python's dev_mode defaults off and is rarely persisted.
+    // Persist dev_mode across sessions — Python parity (M2).
+    _devMode = widget.initial.devMode;
     for (final c in [_texconv, _repak, _basePak, _modsFolder]) {
       c.addListener(() => setState(() {}));
     }
@@ -165,6 +166,7 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
       repak: _repak.text,
       baseGamePak: _basePak.text,
       modsFolder: _modsFolder.text,
+      devMode: _devMode,
     );
     try {
       await ref.read(configRepositoryProvider).save(cfg);

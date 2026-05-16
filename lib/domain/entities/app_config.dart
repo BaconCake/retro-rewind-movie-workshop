@@ -26,30 +26,41 @@ class AppConfig {
   final String baseGamePak;
   final String modsFolder;
 
+  /// Opt-in extra logging / diagnostics surface.  Python persists this
+  /// alongside the path fields (RR_VHS_Tool.py:6878-6885, default false).
+  /// Currently exposed via the SetupDialog checkbox; reading-side wiring
+  /// is the caller's responsibility (no behaviour change in pak builder
+  /// today — see M2 audit M7).
+  final bool devMode;
+
   const AppConfig({
     required this.texconv,
     required this.repak,
     required this.baseGamePak,
     required this.modsFolder,
+    this.devMode = false,
   });
 
   const AppConfig.empty()
       : texconv = '',
         repak = '',
         baseGamePak = '',
-        modsFolder = '';
+        modsFolder = '',
+        devMode = false;
 
   AppConfig copyWith({
     String? texconv,
     String? repak,
     String? baseGamePak,
     String? modsFolder,
+    bool? devMode,
   }) {
     return AppConfig(
       texconv: texconv ?? this.texconv,
       repak: repak ?? this.repak,
       baseGamePak: baseGamePak ?? this.baseGamePak,
       modsFolder: modsFolder ?? this.modsFolder,
+      devMode: devMode ?? this.devMode,
     );
   }
 
@@ -72,6 +83,7 @@ class AppConfig {
           baseGamePak.isEmpty || _fileExists(baseGamePak) ? baseGamePak : '',
       modsFolder:
           modsFolder.isEmpty || _dirExists(modsFolder) ? modsFolder : '',
+      devMode: devMode,
     );
   }
 
