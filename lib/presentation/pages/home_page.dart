@@ -38,17 +38,20 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   /// Open the setup dialog if the loaded config doesn't point at real
   /// files/dirs — first-launch flow.  Runs once per HomePage mount; the
-  /// re-entry button uses [_openSetup] directly.
+  /// re-entry button uses [_openSetup] directly.  Non-dismissable so the
+  /// user can only proceed past it via a successful save — Python parity
+  /// (RR_VHS_Tool.py:14997-15008 keeps the root withdrawn until on_complete).
   Future<void> _maybeShowSetupOnLaunch() async {
     if (_setupChecked) return;
     _setupChecked = true;
     final cfg = await ref.read(configFutureProvider.future);
     if (cfg.isReady) return;
     if (!mounted) return;
-    await SetupDialog.show(context, ref);
+    await SetupDialog.show(context, ref, dismissible: false);
   }
 
   Future<void> _openSetup() async {
+    // Returning user amending paths — close button allowed.
     await SetupDialog.show(context, ref);
   }
 

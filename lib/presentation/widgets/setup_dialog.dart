@@ -22,17 +22,32 @@ bool _isDirAtPath(String path) =>
 class SetupDialog extends ConsumerStatefulWidget {
   final AppConfig initial;
 
-  const SetupDialog._({required this.initial});
+  /// When false, the user MUST save to dismiss — no close button rendered,
+  /// no Android-back / Escape exit.  First-launch flow uses this so the
+  /// app can't reach HomePage with an invalid config.  Python's first-run
+  /// path has the same property (RR_VHS_Tool.py:14997-15008 — root stays
+  /// withdrawn until `_save` succeeds).
+  final bool dismissible;
+
+  const SetupDialog._({required this.initial, required this.dismissible});
 
   /// Open the dialog, returning true when the user saved.  Loads the
   /// current config first so existing values pre-fill the fields.
-  static Future<bool> show(BuildContext context, WidgetRef ref) async {
+  ///
+  /// [dismissible] defaults to true (returning user amending paths).  Pass
+  /// false from the first-launch gate so the user can't dismiss without
+  /// saving — Python parity (RR_VHS_Tool.py:14997-15008).
+  static Future<bool> show(
+    BuildContext context,
+    WidgetRef ref, {
+    bool dismissible = true,
+  }) async {
     final initial = await ref.read(configRepositoryProvider).load();
     if (!context.mounted) return false;
     final saved = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => SetupDialog._(initial: initial),
+      builder: (_) => SetupDialog._(initial: initial, dismissible: dismissible),
     );
     if (saved == true) {
       // Refresh every provider that depends on config / paths.
@@ -157,20 +172,29 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: kColorPanel,
-      shape: const RoundedRectangleBorder(),
-      insetPadding: const EdgeInsets.all(kSp6),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 720),
-        child: Padding(
-          padding: const EdgeInsets.all(kSp4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _Header(onClose: () => Navigator.of(context).pop(false)),
-              const SizedBox(height: kSp4),
+    // Block Android-back / Escape from popping when not dismissible.  The
+    // close button is also hidden in the header — together that means the
+    // only exit from a first-launch dialog is a successful `_save`.
+    return PopScope(
+      canPop: widget.dismissible,
+      child: Dialog(
+        backgroundColor: kColorPanel,
+        shape: const RoundedRectangleBorder(),
+        insetPadding: const EdgeInsets.all(kSp6),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: Padding(
+            padding: const EdgeInsets.all(kSp4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _Header(
+                  onClose: widget.dismissible
+                      ? () => Navigator.of(context).pop(false)
+                      : null,
+                ),
+                const SizedBox(height: kSp4),
               Align(
                 alignment: Alignment.centerLeft,
                 child: OutlinedButton.icon(
@@ -269,12 +293,15 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
           ),
         ),
       ),
+    ),
     );
   }
 }
 
 class _Header extends StatelessWidget {
-  final VoidCallback onClose;
+  /// When null, no close button is rendered — first-launch flow uses this
+  /// so the user can only exit via a successful `_save`.
+  final VoidCallback? onClose;
   const _Header({required this.onClose});
 
   @override
@@ -293,13 +320,14 @@ class _Header extends StatelessWidget {
             ),
           ),
         ),
-        IconButton(
-          tooltip: 'Close',
-          icon: const Icon(Icons.close, size: 18),
-          color: kColorText3,
-          onPressed: onClose,
-          visualDensity: VisualDensity.compact,
-        ),
+        if (onClose != null)
+          IconButton(
+            tooltip: 'Close',
+            icon: const Icon(Icons.close, size: 18),
+            color: kColorText3,
+            onPressed: onClose,
+            visualDensity: VisualDensity.compact,
+          ),
       ],
     );
   }
