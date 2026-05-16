@@ -2,6 +2,28 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+/// Outcome of [SetupAutoDetect.ensureModsFolder].
+enum ModsFolderEnsureStatus { alreadyExisted, created, failed }
+
+class ModsFolderEnsureResult {
+  final ModsFolderEnsureStatus status;
+  final String? error;
+
+  const ModsFolderEnsureResult._(this.status, [this.error]);
+  const ModsFolderEnsureResult.alreadyExisted()
+      : this._(ModsFolderEnsureStatus.alreadyExisted);
+  const ModsFolderEnsureResult.created()
+      : this._(ModsFolderEnsureStatus.created);
+  const ModsFolderEnsureResult.failed(String reason)
+      : this._(ModsFolderEnsureStatus.failed, reason);
+
+  bool get wasCreated => status == ModsFolderEnsureStatus.created;
+  bool get existed => status == ModsFolderEnsureStatus.alreadyExisted;
+  bool get isOk =>
+      status == ModsFolderEnsureStatus.created ||
+      status == ModsFolderEnsureStatus.alreadyExisted;
+}
+
 /// Bundle of auto-detected paths.  Any field can be null when detection
 /// failed for that resource — the dialog leaves it for manual entry.
 class SetupAutoDetectResult {
@@ -67,6 +89,27 @@ class SetupAutoDetect {
   /// expects it to be present for any pak it loads from there).
   static String deriveModsFolder(String basePakPath) {
     return p.join(p.dirname(basePakPath), '~mods');
+  }
+
+  /// Try to `mkdir -p` [modsFolder].  Returns one of:
+  ///   * `alreadyExisted` — the directory was already present.
+  ///   * `created` — the directory did not exist and was created.
+  ///   * `failed` — neither, plus the OSError surfaced for logging.
+  ///
+  /// Pure port of Python's `_set_game_folder` mkdir block
+  /// (RR_VHS_Tool.py:7345-7366).  The UI uses the [created] outcome to
+  /// surface a "Created" badge / SnackBar so the user knows we touched
+  /// their filesystem.
+  static ModsFolderEnsureResult ensureModsFolder(String modsFolder) {
+    if (modsFolder.isEmpty) return ModsFolderEnsureResult.failed('empty path');
+    final dir = Directory(modsFolder);
+    if (dir.existsSync()) return ModsFolderEnsureResult.alreadyExisted();
+    try {
+      dir.createSync(recursive: true);
+      return ModsFolderEnsureResult.created();
+    } catch (e) {
+      return ModsFolderEnsureResult.failed(e.toString());
+    }
   }
 
   /// Run every detector and bundle the results.  modsFolder is derived

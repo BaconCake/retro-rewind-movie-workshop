@@ -107,4 +107,54 @@ void main() {
       expect(p.dirname(mods), p.dirname(pak));
     });
   });
+
+  group('SetupAutoDetect.ensureModsFolder (H2)', () {
+    late Directory tmp;
+
+    setUp(() async {
+      tmp = await Directory.systemTemp.createTemp('rr_ensure_mods_');
+    });
+
+    tearDown(() async {
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    test('creates a missing directory and reports wasCreated', () {
+      final target = p.join(tmp.path, '~mods');
+      expect(Directory(target).existsSync(), isFalse);
+
+      final r = SetupAutoDetect.ensureModsFolder(target);
+      expect(r.wasCreated, isTrue);
+      expect(r.existed, isFalse);
+      expect(r.isOk, isTrue);
+      expect(Directory(target).existsSync(), isTrue);
+    });
+
+    test('idempotent when the directory already exists', () async {
+      final target = p.join(tmp.path, '~mods');
+      await Directory(target).create();
+
+      final r = SetupAutoDetect.ensureModsFolder(target);
+      expect(r.existed, isTrue);
+      expect(r.wasCreated, isFalse);
+      expect(r.isOk, isTrue);
+    });
+
+    test('recursive create — parent directories are made as needed', () {
+      final target =
+          p.join(tmp.path, 'Steam', 'common', 'RetroRewind', 'Content',
+              'Paks', '~mods');
+      final r = SetupAutoDetect.ensureModsFolder(target);
+      expect(r.wasCreated, isTrue);
+      expect(Directory(target).existsSync(), isTrue);
+    });
+
+    test('empty path reports failed without touching disk', () {
+      final r = SetupAutoDetect.ensureModsFolder('');
+      expect(r.isOk, isFalse);
+      expect(r.error, isNotNull);
+    });
+  });
 }

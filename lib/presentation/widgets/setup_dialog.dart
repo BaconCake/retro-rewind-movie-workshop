@@ -110,11 +110,22 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
         _modsFolder.text = r.modsFolder!;
       }
     });
+    // Auto-create the ~mods directory when we just derived its path —
+    // Python parity (`_set_game_folder`, RR_VHS_Tool.py:7345-7366).  The
+    // engine expects the dir to exist before it loads any pak from there,
+    // and without this the user's _canSave gate fails and they have to
+    // create the folder manually.  Only run when we set the field
+    // ourselves; user-typed paths are user-typed.
+    var modsCreated = false;
+    if (r.modsFolder != null && _modsFolder.text == r.modsFolder) {
+      final ensure = SetupAutoDetect.ensureModsFolder(_modsFolder.text);
+      modsCreated = ensure.wasCreated;
+    }
     final found = [
       if (r.texconv != null) 'texconv',
       if (r.repak != null) 'repak',
       if (r.baseGamePak != null) 'base pak',
-      if (r.modsFolder != null) '~mods',
+      if (r.modsFolder != null) modsCreated ? '~mods (created)' : '~mods',
     ];
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
