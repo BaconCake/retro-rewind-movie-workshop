@@ -88,17 +88,20 @@ class ImagePreparer {
     final nw = (rgb.width * scale).toInt();
     final nh = (rgb.height * scale).toInt();
 
-    // package:image is pure-Dart and slow at high resolutions; cubic was
-    // 4-6× slower than linear on a 1024×2048 canvas in our benchmarks
-    // (perf-2/perf-3 measurements, 2026-05-08).  Output goes through DXT1
-    // + mip generation in texconv — at that block-compression stage any
-    // visible difference between linear and cubic is dominated by DXT1
-    // quantisation noise, so the quality cost is effectively zero.
+    // Highest-quality resampler available in package:image — package:image
+    // has no LANCZOS option, so cubic is the closest match to Python's
+    // `Image.LANCZOS` (RR_VHS_Tool.py:5547/5564).  An earlier benchmark
+    // (perf-2/perf-3, 2026-05-08) clocked cubic at 4-6× linear on a
+    // 1024×2048 canvas, and we initially traded quality for speed —
+    // but the audit confirmed visible softening of text + line-art that
+    // DXT1 quantisation does NOT hide, so we're back on cubic.  Each
+    // injected slot pays an extra ~200 ms; for a 30-slot ship that's
+    // ~6 s of build time, in exchange for crisper cover detail.
     final resized = img.copyResize(
       rgb,
       width: nw,
       height: nh,
-      interpolation: img.Interpolation.linear,
+      interpolation: img.Interpolation.cubic,
     );
 
     // Black 1024×2048 RGB canvas.
