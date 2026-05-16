@@ -221,33 +221,41 @@ class PakBuilderImpl implements PakBuilder {
     });
 
     // Build DataTables only for genres present in customSlots.  The manager
-    // skips any genre without an override (CUSTOM_ONLY_MODE).
+    // skips any genre without an override (CUSTOM_ONLY_MODE).  Per-genre
+    // failures are non-fatal — the pak ships the genres that did build, and
+    // the engine falls back to the base game for the rest.  Pure port of
+    // Python's accumulating loop (RR_VHS_Tool.py:14722-14740).
     final dtDir =
         Directory(p.join(workRoot.path, kDataTableRootPath));
     await dtDir.create(recursive: true);
-    try {
-      await _phase('Genre DataTables', timings, () async {
-        final results = await _dataTables.buildAll(
-          config,
-          slotOverrides: customSlots,
-          log: (dt, msg) => _log('DataTable[$dt]: $msg'),
-        );
-        for (final entry in results.entries) {
-          final dt = entry.key;
-          final r = entry.value;
-          await File(p.join(dtDir.path, '$dt.uasset'))
-              .writeAsBytes(r.uassetBytes);
-          await File(p.join(dtDir.path, '$dt.uexp'))
-              .writeAsBytes(r.uexpBytes);
-          _step('DataTable $dt');
+    await _phase('Genre DataTables', timings, () async {
+      final outcome = await _dataTables.buildAllLenient(
+        config,
+        slotOverrides: customSlots,
+        log: (dt, msg) => _log('DataTable[$dt]: $msg'),
+      );
+      for (final entry in outcome.built.entries) {
+        final dt = entry.key;
+        final r = entry.value;
+        await File(p.join(dtDir.path, '$dt.uasset'))
+            .writeAsBytes(r.uassetBytes);
+        await File(p.join(dtDir.path, '$dt.uexp'))
+            .writeAsBytes(r.uexpBytes);
+        _step('DataTable $dt');
+      }
+      _log('Wrote ${outcome.built.length} custom DataTables to ${dtDir.path}');
+      if (outcome.failed.isNotEmpty) {
+        _log('WARNING: ${outcome.failed.length} DataTable(s) failed to build '
+            '— those genres will fall back to the base game.');
+        for (final e in outcome.failed.values) {
+          _log('  [${e.code}] ${e.dataTableName}: ${e.message}');
         }
-        _log('Wrote ${results.length} custom DataTables to ${dtDir.path}');
-      });
-    } on DataTableBuildError catch (e) {
-      return _fail(e.code, '${e.dataTableName}: ${e.message}');
-    } catch (e) {
-      return _fail('E004', 'DataTable build threw: $e');
-    }
+      }
+      // Tick the skipped per-DT progress units so the bar doesn't get stuck.
+      for (var i = 0; i < outcome.failed.length; i++) {
+        _step('DataTable skipped');
+      }
+    });
 
     // Write the texture files for every custom slot listed in customSlots.
     // Slots with a replacement entry get the user image (texconv'd → ubulk +
