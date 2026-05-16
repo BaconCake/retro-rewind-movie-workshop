@@ -641,6 +641,80 @@ class TextureInjectorImpl implements TextureInjector {
     final uexp = await File(ueRes.path!).readAsBytes();
     return (uasset: uasset, uexp: uexp);
   }
+
+  /// Like [_readNrHorDonor] but also reads `.ubulk` — needed by
+  /// [writeNrDonorClone], where there's no user image to texconv into a
+  /// fresh ubulk so we must copy the donor's verbatim.  Pure port of
+  /// `prepare_nr_donor_in_cache` (RR_VHS_Tool.py:2362-2381) which copies
+  /// all three sidecars from the donor folder.
+  ///
+  /// Lazy in the caller: only invoked when at least one slot actually
+  /// needs cloning, so a build with full user-coverage doesn't pay the
+  /// ~1.4 MB ubulk read.
+  Future<({Uint8List uasset, Uint8List uexp, Uint8List ubulk})>
+      _readNrHorDonorTrio(AppConfig config) async {
+    const donorBase =
+        '$_kBackgroundPakPrefix/T_Bkg_Hor/T_New_Hor_01';
+    final uaRes = await pakCache.extractFile(config, '$donorBase.uasset');
+    final ueRes = await pakCache.extractFile(config, '$donorBase.uexp');
+    final ubRes = await pakCache.extractFile(config, '$donorBase.ubulk');
+    if (!uaRes.ok || !ueRes.ok || !ubRes.ok) {
+      throw StateError(
+        'Could not extract T_New_Hor_01 donor trio: '
+        'uasset=${uaRes.warning}, uexp=${ueRes.warning}, '
+        'ubulk=${ubRes.warning}',
+      );
+    }
+    return (
+      uasset: await File(uaRes.path!).readAsBytes(),
+      uexp: await File(ueRes.path!).readAsBytes(),
+      ubulk: await File(ubRes.path!).readAsBytes(),
+    );
+  }
+
+  @override
+  Future<bool> writeNrDonorClone({
+    required AppConfig config,
+    required String workRoot,
+    required String genreCode,
+    required int texNum,
+  }) async {
+    final name = 'T_New_${genreCode}_${texNum.toString().padLeft(3, '0')}';
+    final folder = 'T_Bkg_$genreCode';
+    final destDir = Directory(p.join(workRoot, 'RetroRewind', 'Content',
+        'VideoStore', 'asset', 'prop', 'vhs', 'Background', folder));
+    final uaPath = p.join(destDir.path, '$name.uasset');
+    final uePath = p.join(destDir.path, '$name.uexp');
+    final ubPath = p.join(destDir.path, '$name.ubulk');
+
+    // Idempotent: if [inject] already wrote the trio for a slot that does
+    // have a user image, leave its bytes alone — the user image always wins.
+    final existing = await Future.wait([
+      File(uaPath).exists(),
+      File(uePath).exists(),
+      File(ubPath).exists(),
+    ]);
+    if (existing.every((e) => e)) return false;
+
+    final donor = await _readNrHorDonorTrio(config);
+    final clonedUa = cloneTexture3digit(
+      srcData: donor.uasset,
+      srcCode: 'Hor',
+      srcNum: 1,
+      dstCode: genreCode,
+      dstNum: texNum,
+    );
+    await destDir.create(recursive: true);
+    await Future.wait([
+      File(uaPath).writeAsBytes(clonedUa),
+      // uexp + ubulk are pixel-data containers — name-independent, so a
+      // verbatim copy from the Hor donor is correct (matches Python's
+      // `shutil.copy2` at RR_VHS_Tool.py:2371).
+      File(uePath).writeAsBytes(donor.uexp),
+      File(ubPath).writeAsBytes(donor.ubulk),
+    ]);
+    return true;
+  }
 }
 
 /// Run the slow part of the inject pipeline (PNG resize+encode then

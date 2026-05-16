@@ -251,6 +251,26 @@ void main() {
             'Standees_Collection_${s.sku}');
         expectFile('$bp.uasset', 'Blueprint uasset missing for SKU ${s.sku}');
         expectFile('$bp.uexp', 'Blueprint uexp missing for SKU ${s.sku}');
+
+        // T_New donor clone (A2 — RR_VHS_Tool.py:2311-2384, 2564-2593).
+        // No replacements.json in this fixture, so every NR slot must be
+        // covered by the Hor donor clone path.  Without it the shelf VHS
+        // shows nothing in-game because the base pak only ships 2-digit
+        // T_New slots.
+        final tNew = p.join(assetRoot, 'vhs', 'Background',
+            'T_Bkg_${s.genreCode}', s.bkgTex);
+        expectFile('$tNew.uasset',
+            'T_New uasset missing for ${s.bkgTex} (no-cover donor clone)');
+        expectFile('$tNew.uexp',
+            'T_New uexp missing for ${s.bkgTex} (no-cover donor clone)');
+        expectFile('$tNew.ubulk',
+            'T_New ubulk missing for ${s.bkgTex} (no-cover donor clone)');
+        // The cloned uasset must embed the target slot name (Drama/Horror/
+        // Sci-Fi), not the donor's "T_New_Hor_01" — confirms cloneTexture3digit
+        // actually ran instead of a verbatim copy.
+        final clonedUaBytes = await File('$tNew.uasset').readAsBytes();
+        expect(_bytesContainAscii(clonedUaBytes, s.bkgTex), isTrue,
+            reason: 'cloned uasset for ${s.bkgTex} must embed its own name');
       }
 
       // 3) Re-parse the NR DT and verify our titles all landed in the

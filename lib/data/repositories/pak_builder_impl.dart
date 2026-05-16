@@ -271,11 +271,19 @@ class PakBuilderImpl implements PakBuilder {
         return _fail('E004', 'NewRelease build threw: $e');
       }
       // Custom NR cover textures (T_New_*).  Only fires for slots with a
-      // replacement entry — slots without a cover let the engine fall back
-      // to the base game's NR texture (which is fine for genres with
-      // newCount>0 and acceptable as a "no cover yet" state).
+      // replacement entry — slots without a cover get the base-game Hor
+      // donor clone written by the ensure pass below.
       await _phase('NR textures', timings, () =>
           _writeNrTextures(config, workRoot.path, nrSlots, replacements));
+
+      // Donor-clone fallback for NRs without a user image.  Pure port of
+      // `prepare_nr_donor_in_cache` + `ensure_nr_texture`
+      // (RR_VHS_Tool.py:14565-14568, 14756-14759).  The base pak only ships
+      // 2-digit T_New slots; v1.8.2 saves NRs as 3-digit, so without this
+      // pass the slot's shelf VHS resolves to nothing in-game.  Idempotent
+      // — skips slots already covered by the injection pass above.
+      await _phase('NR donor clones', timings, () =>
+          _ensureNrTextures(config, workRoot.path, nrSlots));
 
       // Legacy 2-digit co-inject (v1.8.2.1).  Pre-v1.8.2 saves persist NR
       // FNames in the 2-digit form (`T_New_Sci_01`) at NR-purchase time,
@@ -587,6 +595,52 @@ class PakBuilderImpl implements PakBuilder {
       if (o == _InjectOutcome.failed) failed++;
     }
     _log('NR covers: $injected injected, $failed failed');
+  }
+
+  /// For every NR slot, guarantee that the 3-digit `T_New_<code>_<NN:03d>`
+  /// trio is in [workRoot] by cloning `T_New_Hor_01` when injection didn't
+  /// already write it (the slot has no user image).  Pure port of the
+  /// Python build pipeline's pre-pass + post-pass
+  /// (RR_VHS_Tool.py:14565-14568 + 14756-14759).
+  ///
+  /// Without this, an NR slot with no cover ships no asset at all and
+  /// the in-game shelf VHS shows nothing (base game has only 2-digit
+  /// T_New slots; the DataTable references the 3-digit name our writer
+  /// emits).  Per-slot failures log + continue — partial pak still ships.
+  Future<void> _ensureNrTextures(
+      AppConfig config,
+      String workRoot,
+      List<NewReleaseSlot> nrSlots) async {
+    final eligible = [
+      for (final s in nrSlots)
+        if (kNrGenreByte.containsKey(s.genre)) s,
+    ];
+    if (eligible.isEmpty) return;
+
+    var cloned = 0, skipped = 0, failed = 0;
+    for (final s in eligible) {
+      try {
+        final didClone = await _injector.writeNrDonorClone(
+          config: config,
+          workRoot: workRoot,
+          genreCode: s.genreCode,
+          texNum: s.texNum,
+        );
+        if (didClone) {
+          cloned++;
+          _log('  CLONE  NR  ${s.bkgTex} ← T_New_Hor_01');
+          _step('Cloned donor for ${s.bkgTex}');
+        } else {
+          skipped++;
+        }
+      } catch (e) {
+        _log('  FAIL   NR  ${s.bkgTex} donor clone: $e');
+        _step('Failed donor clone ${s.bkgTex}');
+        failed++;
+      }
+    }
+    _log('NR donor clones: $cloned cloned, $skipped already-present, '
+        '$failed failed');
   }
 
   /// Co-inject legacy 2-digit NR cover slots (v1.8.2.1).  For every NR with
