@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:rr_movie_workshop/data/services/setup_autodetect.dart';
+import 'package:rr_movie_workshop/domain/entities/app_config.dart';
 
 void main() {
   group('SetupAutoDetect.findToolsNear', () {
@@ -280,6 +281,116 @@ void main() {
       final libs = SetupAutoDetect
           .findSteamLibrariesFromCandidates([steam, steam, steam]);
       expect(libs, [steam]);
+    });
+  });
+
+  group('classifyAutoDetect (H5)', () {
+    SetupAutoDetectResult result({
+      String? tx,
+      String? rp,
+      String? bp,
+      String? mods,
+    }) =>
+        SetupAutoDetectResult(
+            texconv: tx, repak: rp, baseGamePak: bp, modsFolder: mods);
+
+    test('cold first press, everything detected → all newlyFound', () {
+      final c = classifyAutoDetect(
+        beforeTexconv: '',
+        beforeRepak: '',
+        beforeBasePak: '',
+        beforeModsFolder: '',
+        detected: result(tx: '/tx', rp: '/rp', bp: '/bp', mods: '/m'),
+      );
+      expect(c.texconv, AutoDetectFieldClass.newlyFound);
+      expect(c.repak, AutoDetectFieldClass.newlyFound);
+      expect(c.basePak, AutoDetectFieldClass.newlyFound);
+      expect(c.modsFolder, AutoDetectFieldClass.newlyFound);
+      expect(c.toolsOutcome, AutoDetectSubgroupOutcome.newlyResolved);
+      expect(c.gameOutcome, AutoDetectSubgroupOutcome.newlyResolved);
+      expect(c.anyMissing, isFalse);
+      expect(c.toolsMissingLabels, isEmpty);
+      expect(c.gameMissingLabels, isEmpty);
+    });
+
+    test('all fields already filled → alreadyConfigured even if detected',
+        () {
+      final c = classifyAutoDetect(
+        beforeTexconv: '/old/tx',
+        beforeRepak: '/old/rp',
+        beforeBasePak: '/old/bp',
+        beforeModsFolder: '/old/m',
+        detected: result(tx: '/new/tx', rp: '/new/rp'),
+      );
+      expect(c.texconv, AutoDetectFieldClass.alreadyConfigured);
+      expect(c.repak, AutoDetectFieldClass.alreadyConfigured);
+      expect(c.basePak, AutoDetectFieldClass.alreadyConfigured);
+      expect(c.modsFolder, AutoDetectFieldClass.alreadyConfigured);
+      expect(c.toolsOutcome, AutoDetectSubgroupOutcome.alreadyConfigured);
+      expect(c.gameOutcome, AutoDetectSubgroupOutcome.alreadyConfigured);
+      expect(c.anyMissing, isFalse);
+    });
+
+    test('nothing detected, nothing pre-set → both subgroups missing', () {
+      final c = classifyAutoDetect(
+        beforeTexconv: '',
+        beforeRepak: '',
+        beforeBasePak: '',
+        beforeModsFolder: '',
+        detected: result(),
+      );
+      expect(c.texconv, AutoDetectFieldClass.stillMissing);
+      expect(c.toolsOutcome, AutoDetectSubgroupOutcome.missing);
+      expect(c.gameOutcome, AutoDetectSubgroupOutcome.missing);
+      expect(c.toolsMissingLabels, [kTexconvBasename, kRepakBasename]);
+      expect(c.gameMissingLabels, ['game pak file', 'mods folder']);
+      expect(c.anyMissing, isTrue);
+    });
+
+    test('mixed: tools resolved, game still missing', () {
+      final c = classifyAutoDetect(
+        beforeTexconv: '',
+        beforeRepak: '',
+        beforeBasePak: '',
+        beforeModsFolder: '',
+        detected: result(tx: '/tx', rp: '/rp'),
+      );
+      expect(c.toolsOutcome, AutoDetectSubgroupOutcome.newlyResolved);
+      expect(c.gameOutcome, AutoDetectSubgroupOutcome.missing);
+      expect(c.gameMissingLabels, ['game pak file', 'mods folder']);
+      expect(c.toolsMissingLabels, isEmpty);
+      expect(c.anyMissing, isTrue);
+    });
+
+    test('partial tools detect — newlyResolved + missing-label on the gap',
+        () {
+      final c = classifyAutoDetect(
+        beforeTexconv: '',
+        beforeRepak: '',
+        beforeBasePak: '',
+        beforeModsFolder: '',
+        detected: result(tx: '/tx'),
+      );
+      expect(c.texconv, AutoDetectFieldClass.newlyFound);
+      expect(c.repak, AutoDetectFieldClass.stillMissing);
+      expect(c.toolsOutcome, AutoDetectSubgroupOutcome.missing,
+          reason: 'one missing field downgrades the whole subgroup');
+      expect(c.toolsMissingLabels, [kRepakBasename]);
+    });
+
+    test('subgroup with one alreadyConfigured + one newlyFound → '
+        'newlyResolved', () {
+      final c = classifyAutoDetect(
+        beforeTexconv: '/old/tx',
+        beforeRepak: '',
+        beforeBasePak: '',
+        beforeModsFolder: '',
+        detected: result(rp: '/rp'),
+      );
+      expect(c.texconv, AutoDetectFieldClass.alreadyConfigured);
+      expect(c.repak, AutoDetectFieldClass.newlyFound);
+      expect(c.toolsOutcome, AutoDetectSubgroupOutcome.newlyResolved,
+          reason: 'any newlyFound trumps alreadyConfigured when nothing missing');
     });
   });
 

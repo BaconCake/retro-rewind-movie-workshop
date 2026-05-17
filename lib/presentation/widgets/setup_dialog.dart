@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -58,13 +59,28 @@ class SetupDialog extends ConsumerStatefulWidget {
   ConsumerState<SetupDialog> createState() => _SetupDialogState();
 }
 
-class _SetupDialogState extends ConsumerState<SetupDialog> {
+class _SetupDialogState extends ConsumerState<SetupDialog>
+    with SingleTickerProviderStateMixin {
   late final TextEditingController _texconv;
   late final TextEditingController _repak;
   late final TextEditingController _basePak;
   late final TextEditingController _modsFolder;
   late bool _devMode;
   bool _saving = false;
+
+  /// H5 — inline status from the last AUTO-DETECT press.  Null until the
+  /// user presses; cleared again 3s after a fully-OK press.  Persists
+  /// indefinitely while any subgroup is `missing` so the user can read it.
+  AutoDetectClassification? _autoStatus;
+  bool _autoModsCreated = false;
+
+  /// Consecutive `missing` outcomes per subgroup.  When either hits 2 we
+  /// flash the corresponding row red→bright to draw attention (Python
+  /// `_auto_detect_tools` repeat-press escalation, RR_VHS_Tool.py:7181-7236).
+  int _toolsFailStreak = 0;
+  int _gameFailStreak = 0;
+  Timer? _autoClearTimer;
+  late final AnimationController _flashController;
 
   @override
   void initState() {
@@ -78,10 +94,16 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
     for (final c in [_texconv, _repak, _basePak, _modsFolder]) {
       c.addListener(() => setState(() {}));
     }
+    _flashController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
   }
 
   @override
   void dispose() {
+    _autoClearTimer?.cancel();
+    _flashController.dispose();
     _texconv.dispose();
     _repak.dispose();
     _basePak.dispose();
@@ -113,6 +135,13 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
   }
 
   Future<void> _autoDetect() async {
+    // Snapshot field state BEFORE detection — drives the H5 classifier
+    // (newlyFound vs alreadyConfigured vs stillMissing per field).
+    final beforeTx = _texconv.text;
+    final beforeRp = _repak.text;
+    final beforeBp = _basePak.text;
+    final beforeMf = _modsFolder.text;
+
     final exeDir = ref.read(workingDirProvider);
     final r = SetupAutoDetect.detectAll(exeDir);
     setState(() {
@@ -126,33 +155,63 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
       }
     });
     // Auto-create the ~mods directory when we just derived its path —
-    // Python parity (`_set_game_folder`, RR_VHS_Tool.py:7345-7366).  The
-    // engine expects the dir to exist before it loads any pak from there,
-    // and without this the user's _canSave gate fails and they have to
-    // create the folder manually.  Only run when we set the field
-    // ourselves; user-typed paths are user-typed.
+    // Python parity (`_set_game_folder`, RR_VHS_Tool.py:7345-7366).  Only
+    // run when WE set the field; user-typed paths are user-typed.
     var modsCreated = false;
     if (r.modsFolder != null && _modsFolder.text == r.modsFolder) {
       final ensure = SetupAutoDetect.ensureModsFolder(_modsFolder.text);
       modsCreated = ensure.wasCreated;
     }
-    final found = [
-      if (r.texconv != null) 'texconv',
-      if (r.repak != null) 'repak',
-      if (r.baseGamePak != null) 'base pak',
-      if (r.modsFolder != null) modsCreated ? '~mods (created)' : '~mods',
-    ];
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        backgroundColor: kColorPanel,
-        duration: const Duration(seconds: 3),
-        content: Text(
-          found.isEmpty
-              ? 'Auto-detect found nothing.'
-              : 'Auto-detect filled: ${found.join(", ")}.',
-          style: const TextStyle(color: kColorCyan, fontFamily: kFontFamily),
-        ),
-      ));
+
+    final classification = classifyAutoDetect(
+      beforeTexconv: beforeTx,
+      beforeRepak: beforeRp,
+      beforeBasePak: beforeBp,
+      beforeModsFolder: beforeMf,
+      detected: r,
+    );
+
+    // Update per-subgroup consecutive-failure streak.  Hitting 2 in a
+    // row triggers the flash escalation below.
+    if (classification.toolsOutcome == AutoDetectSubgroupOutcome.missing) {
+      _toolsFailStreak++;
+    } else {
+      _toolsFailStreak = 0;
+    }
+    if (classification.gameOutcome == AutoDetectSubgroupOutcome.missing) {
+      _gameFailStreak++;
+    } else {
+      _gameFailStreak = 0;
+    }
+
+    _autoClearTimer?.cancel();
+    setState(() {
+      _autoStatus = classification;
+      _autoModsCreated = modsCreated;
+    });
+
+    if (_toolsFailStreak >= 2 || _gameFailStreak >= 2) {
+      unawaited(_runFlash());
+    }
+
+    // Auto-fade success-only status after 3s; persist missing-status
+    // indefinitely so the user can read which fields still need attention.
+    if (!classification.anyMissing) {
+      _autoClearTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _autoStatus = null);
+      });
+    }
+  }
+
+  /// 3-cycle red↔bright flash to escalate repeated AUTO-DETECT failures.
+  /// Drives `_AutoDetectStatusPanel`'s flashing colour via the shared
+  /// controller.  Bails out if the dialog unmounts mid-animation.
+  Future<void> _runFlash() async {
+    for (var i = 0; i < 3; i++) {
+      if (!mounted) return;
+      await _flashController.forward(from: 0);
+      if (!mounted) return;
+      await _flashController.reverse();
     }
   }
 
@@ -284,6 +343,16 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
                   ),
                 ],
               ),
+              if (_autoStatus != null) ...[
+                const SizedBox(height: kSp2),
+                _AutoDetectStatusPanel(
+                  classification: _autoStatus!,
+                  modsCreated: _autoModsCreated,
+                  flashController: _flashController,
+                  toolsFlashing: _toolsFailStreak >= 2,
+                  gameFlashing: _gameFailStreak >= 2,
+                ),
+              ],
               const SizedBox(height: kSp4),
               _PathRow(
                 label: 'TEXCONV',
@@ -542,6 +611,131 @@ class _StatusDot extends StatelessWidget {
           shape: BoxShape.circle,
         ),
       ),
+    );
+  }
+}
+
+/// Inline status panel rendered below the AUTO-DETECT / BROWSE row after
+/// any AUTO-DETECT press.  Shows two lines (tools, game) classified
+/// independently by [classifyAutoDetect] (H5) — cyan when the subgroup
+/// resolved, dimmed when already-configured, pink/missing-list when
+/// stillMissing.  When the same subgroup misses twice in a row the
+/// caller drives [flashController]; we lerp toward bright-red while
+/// the controller animates.
+class _AutoDetectStatusPanel extends StatelessWidget {
+  final AutoDetectClassification classification;
+  final bool modsCreated;
+  final AnimationController flashController;
+  final bool toolsFlashing;
+  final bool gameFlashing;
+
+  const _AutoDetectStatusPanel({
+    required this.classification,
+    required this.modsCreated,
+    required this.flashController,
+    required this.toolsFlashing,
+    required this.gameFlashing,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: flashController,
+      builder: (context, _) {
+        final t = flashController.value;
+        // Pink → bright red.  Same anchor for both rows; per-row flag
+        // decides whether to use the animated colour or stay on plain pink.
+        final flashColour = Color.lerp(kColorPink, const Color(0xFFFF4040), t)!;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _AutoStatusLine(
+              label: 'TOOLS',
+              outcome: classification.toolsOutcome,
+              missingLabels: classification.toolsMissingLabels,
+              flashing: toolsFlashing,
+              flashColour: flashColour,
+            ),
+            const SizedBox(height: kSp1),
+            _AutoStatusLine(
+              label: 'GAME',
+              outcome: classification.gameOutcome,
+              missingLabels: classification.gameMissingLabels,
+              flashing: gameFlashing,
+              flashColour: flashColour,
+              modsCreatedTag:
+                  modsCreated &&
+                          classification.gameOutcome !=
+                              AutoDetectSubgroupOutcome.missing
+                      ? '(~mods created)'
+                      : null,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _AutoStatusLine extends StatelessWidget {
+  final String label;
+  final AutoDetectSubgroupOutcome outcome;
+  final List<String> missingLabels;
+  final bool flashing;
+  final Color flashColour;
+  final String? modsCreatedTag;
+
+  const _AutoStatusLine({
+    required this.label,
+    required this.outcome,
+    required this.missingLabels,
+    required this.flashing,
+    required this.flashColour,
+    this.modsCreatedTag,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color colour, String message) = switch (outcome) {
+      AutoDetectSubgroupOutcome.newlyResolved => (
+          kColorCyan,
+          'auto-detected successfully${modsCreatedTag != null ? ' $modsCreatedTag' : ''}',
+        ),
+      AutoDetectSubgroupOutcome.alreadyConfigured => (
+          kColorText3,
+          'already configured — nothing to update',
+        ),
+      AutoDetectSubgroupOutcome.missing => (
+          flashing ? flashColour : kColorPink,
+          'could not auto-detect: ${missingLabels.join(', ')} — please browse manually',
+        ),
+    };
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 64,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+              letterSpacing: 1.5,
+              color: kColorText2,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            message,
+            style: TextStyle(
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+              color: colour,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

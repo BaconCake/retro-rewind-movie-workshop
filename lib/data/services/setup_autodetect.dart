@@ -2,7 +2,121 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import '../../domain/entities/app_config.dart' show kBaseGamePakBasename;
+import '../../domain/entities/app_config.dart'
+    show kBaseGamePakBasename, kTexconvBasename, kRepakBasename;
+
+/// Outcome bucket for a single field after an AUTO-DETECT press.  Mirrors
+/// Python's `_auto_detect_tools` 3-state classification
+/// (RR_VHS_Tool.py:7181-7236): newly-found vs already-set vs still-blank.
+enum AutoDetectFieldClass {
+  /// Field was empty before the press and detection filled it.
+  newlyFound,
+
+  /// Field already had a value before the press; we never overwrite, so
+  /// this is true regardless of whether detection found one too.
+  alreadyConfigured,
+
+  /// Field was empty and detection could not resolve it.  Drives the
+  /// orange "browse manually" hint + flash-on-retry escalation.
+  stillMissing,
+}
+
+/// Aggregated outcome for a subgroup (tools = texconv+repak,
+/// game = basePak+modsFolder).  `missing` if any field in the subgroup is
+/// still missing; otherwise `newlyResolved` if at least one was just
+/// found, else `alreadyConfigured`.
+enum AutoDetectSubgroupOutcome {
+  newlyResolved,
+  alreadyConfigured,
+  missing,
+}
+
+/// Per-press classification of an AUTO-DETECT result.  Pure value object,
+/// safe to test in isolation.  The SetupDialog uses this to render the
+/// inline status panel and decide when to escalate to a flash.
+class AutoDetectClassification {
+  final AutoDetectFieldClass texconv;
+  final AutoDetectFieldClass repak;
+  final AutoDetectFieldClass basePak;
+  final AutoDetectFieldClass modsFolder;
+
+  /// `tools` covers texconv + repak; `game` covers basePak + modsFolder.
+  final AutoDetectSubgroupOutcome toolsOutcome;
+  final AutoDetectSubgroupOutcome gameOutcome;
+
+  /// Human-readable names of the still-missing fields per subgroup, in
+  /// stable order.  Empty list when the subgroup resolved.
+  final List<String> toolsMissingLabels;
+  final List<String> gameMissingLabels;
+
+  const AutoDetectClassification({
+    required this.texconv,
+    required this.repak,
+    required this.basePak,
+    required this.modsFolder,
+    required this.toolsOutcome,
+    required this.gameOutcome,
+    required this.toolsMissingLabels,
+    required this.gameMissingLabels,
+  });
+
+  bool get anyMissing =>
+      toolsOutcome == AutoDetectSubgroupOutcome.missing ||
+      gameOutcome == AutoDetectSubgroupOutcome.missing;
+}
+
+/// Classify the outcome of one AUTO-DETECT press given the field state
+/// snapshot taken BEFORE the press and the detection result.  Caller is
+/// responsible for actually applying detection (only filling empty
+/// fields) — this function just labels what happened.
+///
+/// Pure port of the classification embedded in Python's
+/// `_auto_detect_tools` (7181-7236) and `_auto_detect_game` (7238-7343).
+AutoDetectClassification classifyAutoDetect({
+  required String beforeTexconv,
+  required String beforeRepak,
+  required String beforeBasePak,
+  required String beforeModsFolder,
+  required SetupAutoDetectResult detected,
+}) {
+  AutoDetectFieldClass classify(String before, String? found) {
+    if (before.isNotEmpty) return AutoDetectFieldClass.alreadyConfigured;
+    if (found != null) return AutoDetectFieldClass.newlyFound;
+    return AutoDetectFieldClass.stillMissing;
+  }
+
+  AutoDetectSubgroupOutcome aggregate(List<AutoDetectFieldClass> fields) {
+    if (fields.contains(AutoDetectFieldClass.stillMissing)) {
+      return AutoDetectSubgroupOutcome.missing;
+    }
+    if (fields.contains(AutoDetectFieldClass.newlyFound)) {
+      return AutoDetectSubgroupOutcome.newlyResolved;
+    }
+    return AutoDetectSubgroupOutcome.alreadyConfigured;
+  }
+
+  final tx = classify(beforeTexconv, detected.texconv);
+  final rp = classify(beforeRepak, detected.repak);
+  final bp = classify(beforeBasePak, detected.baseGamePak);
+  final mf = classify(beforeModsFolder, detected.modsFolder);
+
+  return AutoDetectClassification(
+    texconv: tx,
+    repak: rp,
+    basePak: bp,
+    modsFolder: mf,
+    toolsOutcome: aggregate([tx, rp]),
+    gameOutcome: aggregate([bp, mf]),
+    toolsMissingLabels: [
+      if (tx == AutoDetectFieldClass.stillMissing) kTexconvBasename,
+      if (rp == AutoDetectFieldClass.stillMissing) kRepakBasename,
+    ],
+    gameMissingLabels: [
+      if (bp == AutoDetectFieldClass.stillMissing) 'game pak file',
+      if (mf == AutoDetectFieldClass.stillMissing) 'mods folder',
+    ],
+  );
+}
 
 /// Outcome of [SetupAutoDetect.ensureModsFolder].
 enum ModsFolderEnsureStatus { alreadyExisted, created, failed }
