@@ -91,12 +91,22 @@ class AppConfig {
   /// the tool/pak fields carry the expected basename (so a swapped
   /// texconv↔repak entry doesn't silently pass).  Drives the launch-time
   /// check that decides whether to pop the SetupDialog.
-  bool get isReady {
-    return isFileWithExpectedName(texconv, kTexconvBasename) &&
-        isFileWithExpectedName(repak, kRepakBasename) &&
-        isFileWithExpectedName(baseGamePak, kBaseGamePakBasename) &&
-        modsFolder.isNotEmpty &&
-        _dirExists(modsFolder);
+  bool get isReady => missingFields.isEmpty;
+
+  /// Human-readable names of the fields blocking [isReady], in stable
+  /// order (texconv → repak → pak → mods).  Mirrors Python's
+  /// `_update_all_status` missing list (RR_VHS_Tool.py:6970): the
+  /// SetupDialog renders this on the disabled Save button instead of a
+  /// generic "fill in all fields" placeholder so the user sees at a
+  /// glance which fields still need attention.
+  List<String> get missingFields {
+    return [
+      if (!isFileWithExpectedName(texconv, kTexconvBasename)) kTexconvBasename,
+      if (!isFileWithExpectedName(repak, kRepakBasename)) kRepakBasename,
+      if (!isFileWithExpectedName(baseGamePak, kBaseGamePakBasename))
+        'game pak file',
+      if (modsFolder.isEmpty || !_dirExists(modsFolder)) 'mods folder',
+    ];
   }
 }
 

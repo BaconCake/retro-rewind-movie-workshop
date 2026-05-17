@@ -10,9 +10,6 @@ import '../../data/services/setup_autodetect.dart';
 import '../../domain/entities/app_config.dart';
 import '../providers/providers.dart';
 
-bool _isDirAtPath(String path) =>
-    path.isNotEmpty && Directory(path).existsSync();
-
 /// First-run / re-entry setup dialog.  Mirrors Python's `SetupDialog`
 /// (RR_VHS_Tool.py:6211-6798): four required path fields, optional
 /// dev-mode toggle, save disabled until every path resolves.
@@ -92,11 +89,28 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
     super.dispose();
   }
 
-  bool get _canSave =>
-      isFileWithExpectedName(_texconv.text, kTexconvBasename) &&
-      isFileWithExpectedName(_repak.text, kRepakBasename) &&
-      isFileWithExpectedName(_basePak.text, kBaseGamePakBasename) &&
-      _isDirAtPath(_modsFolder.text);
+  /// Snapshot the current field values as an AppConfig.  Used to drive the
+  /// disabled-Save label (H6) so the missing-fields list stays consistent
+  /// with `isReady` / `missingFields` on the domain entity.
+  AppConfig _currentDraft() => AppConfig(
+        texconv: _texconv.text,
+        repak: _repak.text,
+        baseGamePak: _basePak.text,
+        modsFolder: _modsFolder.text,
+        devMode: _devMode,
+      );
+
+  bool get _canSave => _currentDraft().isReady;
+
+  /// "⚠ MISSING: texconv.exe, repak.exe, game pak file, mods folder" —
+  /// Python `_update_all_status` parity (H6).  Returns the legacy generic
+  /// label only when every field somehow has invalid content but no item
+  /// flagged missing (shouldn't happen in practice).
+  String _missingLabel() {
+    final missing = _currentDraft().missingFields;
+    if (missing.isEmpty) return 'FILL IN ALL FIELDS TO CONTINUE';
+    return '⚠ MISSING: ${missing.join(', ')}';
+  }
 
   Future<void> _autoDetect() async {
     final exeDir = ref.read(workingDirProvider);
@@ -161,13 +175,7 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
   Future<void> _save() async {
     if (!_canSave || _saving) return;
     setState(() => _saving = true);
-    final cfg = AppConfig(
-      texconv: _texconv.text,
-      repak: _repak.text,
-      baseGamePak: _basePak.text,
-      modsFolder: _modsFolder.text,
-      devMode: _devMode,
-    );
+    final cfg = _currentDraft();
     try {
       await ref.read(configRepositoryProvider).save(cfg);
       if (mounted) Navigator.of(context).pop(true);
@@ -299,7 +307,7 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
                       ? 'SAVING…'
                       : _canSave
                           ? 'SETUP COMPLETE — GO TO MAIN MENU'
-                          : 'FILL IN ALL FIELDS TO CONTINUE'),
+                          : _missingLabel()),
                 ),
               ),
             ],

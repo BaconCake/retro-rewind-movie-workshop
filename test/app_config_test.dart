@@ -131,6 +131,77 @@ void main() {
     });
   });
 
+  group('AppConfig.missingFields (H6)', () {
+    late Directory tmp;
+
+    setUp(() async {
+      tmp = await Directory.systemTemp.createTemp('rr_appconfig_missing_');
+    });
+
+    tearDown(() async {
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    test('empty config lists all four fields in stable order', () {
+      expect(const AppConfig.empty().missingFields,
+          [kTexconvBasename, kRepakBasename, 'game pak file', 'mods folder']);
+    });
+
+    test('fully valid config has no missing fields', () async {
+      final tx = File(p.join(tmp.path, kTexconvBasename));
+      final rp = File(p.join(tmp.path, kRepakBasename));
+      final pk = File(p.join(tmp.path, kBaseGamePakBasename));
+      final mods = await Directory(p.join(tmp.path, '~mods')).create();
+      await tx.writeAsString('');
+      await rp.writeAsString('');
+      await pk.writeAsString('');
+
+      final cfg = AppConfig(
+        texconv: tx.path,
+        repak: rp.path,
+        baseGamePak: pk.path,
+        modsFolder: mods.path,
+      );
+      expect(cfg.missingFields, isEmpty);
+    });
+
+    test('only the failing fields appear', () async {
+      final tx = File(p.join(tmp.path, kTexconvBasename));
+      await tx.writeAsString('');
+
+      // tools half-set: texconv ok, repak missing, pak path wrong, mods empty.
+      final cfg = AppConfig(
+        texconv: tx.path,
+        repak: '',
+        baseGamePak: '',
+        modsFolder: '',
+      );
+      expect(cfg.missingFields,
+          [kRepakBasename, 'game pak file', 'mods folder']);
+    });
+
+    test('basename-swap counts as missing for both fields', () async {
+      final tx = File(p.join(tmp.path, kTexconvBasename));
+      final rp = File(p.join(tmp.path, kRepakBasename));
+      final pk = File(p.join(tmp.path, kBaseGamePakBasename));
+      final mods = await Directory(p.join(tmp.path, '~mods')).create();
+      await tx.writeAsString('');
+      await rp.writeAsString('');
+      await pk.writeAsString('');
+
+      // Swap the two tool fields — both fail basename check.
+      final cfg = AppConfig(
+        texconv: rp.path,
+        repak: tx.path,
+        baseGamePak: pk.path,
+        modsFolder: mods.path,
+      );
+      expect(cfg.missingFields, [kTexconvBasename, kRepakBasename]);
+    });
+  });
+
   group('AppConfig.withClearedStalePaths (H1)', () {
     late Directory tmp;
 
