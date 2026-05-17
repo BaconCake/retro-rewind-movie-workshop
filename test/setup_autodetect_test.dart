@@ -108,6 +108,105 @@ void main() {
     });
   });
 
+  group('SetupAutoDetect Steam-scan H4', () {
+    late Directory tmp;
+
+    setUp(() async {
+      tmp = await Directory.systemTemp.createTemp('rr_steam_h4_');
+    });
+
+    tearDown(() async {
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    /// Build a fake Steam install at `<tmp>/Steam` with a config/ VDF
+    /// listing a sibling library, plus its own `steamapps/`.
+    Future<String> buildFakeSteamInstall({
+      required List<String> libraryPaths,
+      bool vdfInConfig = true,
+      bool vdfInSteamApps = false,
+    }) async {
+      final steam = p.join(tmp.path, 'Steam');
+      await Directory(p.join(steam, 'steamapps')).create(recursive: true);
+      final vdfBody = StringBuffer('"libraryfolders"\n{\n');
+      for (var i = 0; i < libraryPaths.length; i++) {
+        // VDF escapes single backslashes as `\\`.
+        final escaped = libraryPaths[i].replaceAll(r'\', r'\\');
+        vdfBody.writeln('  "$i"\n  {\n    "path"  "$escaped"\n  }');
+      }
+      vdfBody.writeln('}');
+      if (vdfInConfig) {
+        await Directory(p.join(steam, 'config')).create(recursive: true);
+        await File(p.join(steam, 'config', 'libraryfolders.vdf'))
+            .writeAsString(vdfBody.toString());
+      }
+      if (vdfInSteamApps) {
+        await File(p.join(steam, 'steamapps', 'libraryfolders.vdf'))
+            .writeAsString(vdfBody.toString());
+      }
+      return steam;
+    }
+
+    test('readSteamVdfs unions config/ and steamapps/ VDFs', () async {
+      final steam = await buildFakeSteamInstall(
+        libraryPaths: ['/lib/a'],
+        vdfInConfig: true,
+        vdfInSteamApps: false,
+      );
+      // Overwrite steamapps/ VDF with a different library.
+      final spVdf = File(p.join(steam, 'steamapps', 'libraryfolders.vdf'));
+      await spVdf.writeAsString(
+          '"libraryfolders" { "0" { "path" "/lib/b" } }');
+
+      final libs = SetupAutoDetect.readSteamVdfs(steam);
+      expect(libs.toSet(), {'/lib/a', '/lib/b'},
+          reason: 'must union both VDF locations');
+    });
+
+    test('readSteamVdfs returns empty when no VDFs exist', () {
+      final libs = SetupAutoDetect.readSteamVdfs(p.join(tmp.path, 'nope'));
+      expect(libs, isEmpty);
+    });
+
+    test('findSteamLibrariesFromCandidates includes a root with steamapps/',
+        () async {
+      final steam = await buildFakeSteamInstall(libraryPaths: const []);
+      final libs =
+          SetupAutoDetect.findSteamLibrariesFromCandidates([steam]);
+      expect(libs, contains(steam),
+          reason: 'a path with steamapps/ is itself a library');
+    });
+
+    test('findSteamLibrariesFromCandidates skips paths without steamapps/',
+        () async {
+      final bare = await Directory(p.join(tmp.path, 'NotSteam')).create();
+      final libs =
+          SetupAutoDetect.findSteamLibrariesFromCandidates([bare.path]);
+      expect(libs, isEmpty);
+    });
+
+    test('findSteamLibrariesFromCandidates unions install + VDF libraries',
+        () async {
+      final lib2 = await Directory(p.join(tmp.path, 'Lib2', 'steamapps'))
+          .create(recursive: true);
+      final lib2Root = p.dirname(lib2.path);
+      final steam = await buildFakeSteamInstall(libraryPaths: [lib2Root]);
+      final libs =
+          SetupAutoDetect.findSteamLibrariesFromCandidates([steam]);
+      expect(libs.toSet(), {steam, lib2Root});
+    });
+
+    test('findSteamLibrariesFromCandidates dedupes across overlapping inputs',
+        () async {
+      final steam = await buildFakeSteamInstall(libraryPaths: const []);
+      final libs = SetupAutoDetect
+          .findSteamLibrariesFromCandidates([steam, steam, steam]);
+      expect(libs, [steam]);
+    });
+  });
+
   group('SetupAutoDetect.ensureModsFolder (H2)', () {
     late Directory tmp;
 

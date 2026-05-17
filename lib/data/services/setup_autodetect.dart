@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../../domain/entities/app_config.dart' show kBaseGamePakBasename;
+
 /// Outcome of [SetupAutoDetect.ensureModsFolder].
 enum ModsFolderEnsureStatus { alreadyExisted, created, failed }
 
@@ -75,10 +77,9 @@ class SetupAutoDetect {
   /// listed in the user's `libraryfolders.vdf`.  Returns the absolute path
   /// or null when the game / Steam isn't installed.
   static String? findRetroRewindPak() {
-    if (!Platform.isWindows) return null;
     for (final lib in _findSteamLibraries()) {
       final pak = p.join(lib, 'steamapps', 'common', 'RetroRewind',
-          'RetroRewind', 'Content', 'Paks', 'RetroRewind-Windows.pak');
+          'RetroRewind', 'Content', 'Paks', kBaseGamePakBasename);
       if (File(pak).existsSync()) return pak;
     }
     return null;
@@ -146,16 +147,83 @@ class SetupAutoDetect {
     return out;
   }
 
+  /// Read library roots from BOTH known VDF locations under [steamRoot].
+  /// Modern Steam writes `config/libraryfolders.vdf`; older versions used
+  /// `steamapps/libraryfolders.vdf` — both can be present and they
+  /// occasionally disagree, so we union.  Public for tests.
+  static List<String> readSteamVdfs(String steamRoot) {
+    final libs = <String>{};
+    for (final loc in [
+      p.join(steamRoot, 'config', 'libraryfolders.vdf'),
+      p.join(steamRoot, 'steamapps', 'libraryfolders.vdf'),
+    ]) {
+      libs.addAll(findSteamLibrariesFromVdfAt(loc));
+    }
+    return libs.toList();
+  }
+
+  /// Given a list of candidate Steam install / library paths, return every
+  /// path that looks like a Steam library (has `steamapps/`) plus every
+  /// library listed in any reachable VDF.  Public so tests can drive the
+  /// scan against temp directories without touching real OS paths.
+  static List<String> findSteamLibrariesFromCandidates(
+      List<String> candidates) {
+    final libs = <String>{};
+    for (final root in candidates) {
+      if (!Directory(root).existsSync()) continue;
+      if (Directory(p.join(root, 'steamapps')).existsSync()) {
+        libs.add(root);
+      }
+      libs.addAll(readSteamVdfs(root));
+    }
+    return libs.toList();
+  }
+
+  /// Cross-platform Steam library discovery.  Mirrors Python's
+  /// `_auto_detect_game` scan (RR_VHS_Tool.py:7238-7343):
+  ///   * Windows — every drive letter A-Z × {Program Files (x86)/Steam,
+  ///     Program Files/Steam, Steam, SteamLibrary}.
+  ///   * macOS   — `~/Library/Application Support/Steam`.
+  ///   * Linux   — `~/.steam/steam` and `~/.local/share/Steam`.
   static List<String> _findSteamLibraries() {
-    const roots = [
-      r'C:\Program Files (x86)\Steam',
-      r'C:\Program Files\Steam',
-    ];
-    for (final root in roots) {
-      final vdf = p.join(root, 'config', 'libraryfolders.vdf');
-      final libs = findSteamLibrariesFromVdfAt(vdf);
-      if (libs.isNotEmpty) return libs;
+    if (Platform.isWindows) {
+      return findSteamLibrariesFromCandidates(_windowsSteamCandidates());
+    }
+    if (Platform.isMacOS) {
+      return findSteamLibrariesFromCandidates(_macOSSteamCandidates());
+    }
+    if (Platform.isLinux) {
+      return findSteamLibrariesFromCandidates(_linuxSteamCandidates());
     }
     return const [];
+  }
+
+  static List<String> _windowsSteamCandidates() {
+    final out = <String>[];
+    for (var c = 'A'.codeUnitAt(0); c <= 'Z'.codeUnitAt(0); c++) {
+      final drive = '${String.fromCharCode(c)}:';
+      out.addAll([
+        '$drive\\Program Files (x86)\\Steam',
+        '$drive\\Program Files\\Steam',
+        '$drive\\Steam',
+        '$drive\\SteamLibrary',
+      ]);
+    }
+    return out;
+  }
+
+  static List<String> _macOSSteamCandidates() {
+    final home = Platform.environment['HOME'] ?? '';
+    if (home.isEmpty) return const [];
+    return [p.join(home, 'Library', 'Application Support', 'Steam')];
+  }
+
+  static List<String> _linuxSteamCandidates() {
+    final home = Platform.environment['HOME'] ?? '';
+    if (home.isEmpty) return const [];
+    return [
+      p.join(home, '.steam', 'steam'),
+      p.join(home, '.local', 'share', 'Steam'),
+    ];
   }
 }
