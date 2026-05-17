@@ -108,6 +108,82 @@ void main() {
     });
   });
 
+  group('SetupAutoDetect.resolveGameFolderPick (H3)', () {
+    late Directory tmp;
+    late String pakPath;
+
+    setUp(() async {
+      tmp = await Directory.systemTemp.createTemp('rr_resolve_game_');
+      // Lay out the standard install structure: <root>/RetroRewind/Content/Paks/<pak>
+      final paksDir = await Directory(
+              p.join(tmp.path, 'RetroRewind', 'Content', 'Paks'))
+          .create(recursive: true);
+      final pak = File(p.join(paksDir.path, 'RetroRewind-Windows.pak'));
+      await pak.writeAsString('');
+      pakPath = pak.path;
+    });
+
+    tearDown(() async {
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    test('picks the pak file directly', () {
+      final r = SetupAutoDetect.resolveGameFolderPick(pakPath);
+      expect(r.baseGamePak, pakPath);
+      expect(p.basename(r.modsFolder!), '~mods');
+      expect(p.dirname(r.modsFolder!), p.dirname(pakPath));
+    });
+
+    test('picks the Paks directory (one level above the pak)', () {
+      final paksDir = p.dirname(pakPath);
+      final r = SetupAutoDetect.resolveGameFolderPick(paksDir);
+      expect(r.baseGamePak, pakPath);
+      expect(r.modsFolder, p.join(paksDir, '~mods'));
+    });
+
+    test('picks the inner RetroRewind directory', () {
+      final inner = p.join(tmp.path, 'RetroRewind'); // .../RetroRewind
+      final r = SetupAutoDetect.resolveGameFolderPick(inner);
+      expect(r.baseGamePak, pakPath);
+    });
+
+    test('picks the outer game-root directory', () {
+      final r = SetupAutoDetect.resolveGameFolderPick(tmp.path);
+      expect(r.baseGamePak, pakPath);
+      expect(r.modsFolder, p.join(p.dirname(pakPath), '~mods'));
+    });
+
+    test('returns null when picked file is not the pak', () async {
+      final wrong = File(p.join(tmp.path, 'something.txt'));
+      await wrong.writeAsString('');
+      final r = SetupAutoDetect.resolveGameFolderPick(wrong.path);
+      expect(r.baseGamePak, isNull);
+      expect(r.modsFolder, isNull);
+    });
+
+    test('returns null when picked dir contains no pak', () async {
+      final empty = await Directory(p.join(tmp.path, 'empty')).create();
+      final r = SetupAutoDetect.resolveGameFolderPick(empty.path);
+      expect(r.baseGamePak, isNull);
+      expect(r.modsFolder, isNull);
+    });
+
+    test('returns null for non-existent path', () {
+      final r = SetupAutoDetect.resolveGameFolderPick(
+          p.join(tmp.path, 'does-not-exist'));
+      expect(r.baseGamePak, isNull);
+      expect(r.modsFolder, isNull);
+    });
+
+    test('returns null for empty input', () {
+      final r = SetupAutoDetect.resolveGameFolderPick('');
+      expect(r.baseGamePak, isNull);
+      expect(r.modsFolder, isNull);
+    });
+  });
+
   group('SetupAutoDetect Steam-scan H4', () {
     late Directory tmp;
 

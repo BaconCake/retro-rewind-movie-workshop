@@ -85,6 +85,49 @@ class SetupAutoDetect {
     return null;
   }
 
+  /// Resolve a user-picked path into `(basePak, modsFolder)` regardless of
+  /// which level of the install they pointed at.  Mirrors Python's
+  /// `_browse_game_folder` heuristic (RR_VHS_Tool.py:7368-7392): the user
+  /// can pick any of the game root, `RetroRewind/`, `Content/Paks/`, or
+  /// the pak file itself — the tool figures out the rest.
+  ///
+  /// Returns null fields when no `RetroRewind-Windows.pak` is reachable
+  /// under the picked path.  Caller decides how to surface that
+  /// (snackbar, status row, etc.).
+  static ({String? baseGamePak, String? modsFolder})
+      resolveGameFolderPick(String pickedPath) {
+    if (pickedPath.isEmpty) return (baseGamePak: null, modsFolder: null);
+
+    // (1) Picked a file — must be the pak itself.
+    if (File(pickedPath).existsSync()) {
+      if (p.basename(pickedPath).toLowerCase() ==
+          kBaseGamePakBasename.toLowerCase()) {
+        return (
+          baseGamePak: pickedPath,
+          modsFolder: deriveModsFolder(pickedPath),
+        );
+      }
+      return (baseGamePak: null, modsFolder: null);
+    }
+
+    // (2) Picked a directory — try every level relative to the pak.
+    if (!Directory(pickedPath).existsSync()) {
+      return (baseGamePak: null, modsFolder: null);
+    }
+    final candidates = [
+      pickedPath,                                              // .../Paks
+      p.join(pickedPath, 'Content', 'Paks'),                   // .../RetroRewind (inner)
+      p.join(pickedPath, 'RetroRewind', 'Content', 'Paks'),    // <game> (outer RR)
+    ];
+    for (final dir in candidates) {
+      final pak = p.join(dir, kBaseGamePakBasename);
+      if (File(pak).existsSync()) {
+        return (baseGamePak: pak, modsFolder: deriveModsFolder(pak));
+      }
+    }
+    return (baseGamePak: null, modsFolder: null);
+  }
+
   /// Mods folder lives next to the base pak: `<paksDir>/~mods`.  Caller is
   /// responsible for creating the dir if it doesn't exist (the engine
   /// expects it to be present for any pak it loads from there).

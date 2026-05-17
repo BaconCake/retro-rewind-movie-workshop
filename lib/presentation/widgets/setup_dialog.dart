@@ -156,6 +156,47 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
     }
   }
 
+  /// Single-pick "find my game" flow.  User points at any of {game root,
+  /// `RetroRewind/`, `Content/Paks/`, the pak file itself} and we fill BOTH
+  /// `baseGamePak` and `modsFolder` from one click.  Auto-creates `~mods`
+  /// if the pak resolves but the directory doesn't exist yet (H2 parity).
+  /// Mirrors Python's `_browse_game_folder` (RR_VHS_Tool.py:7368-7392).
+  Future<void> _browseGameFolder() async {
+    final picked = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Pick game folder, RetroRewind/, or Content/Paks/',
+    );
+    if (picked == null) return;
+    final resolved = SetupAutoDetect.resolveGameFolderPick(picked);
+    if (resolved.baseGamePak == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        backgroundColor: kColorPanel,
+        duration: const Duration(seconds: 4),
+        content: const Text(
+          'Could not find RetroRewind-Windows.pak under that folder.',
+          style: TextStyle(color: kColorPink, fontFamily: kFontFamily),
+        ),
+      ));
+      return;
+    }
+    final ensure = SetupAutoDetect.ensureModsFolder(resolved.modsFolder!);
+    setState(() {
+      _basePak.text = resolved.baseGamePak!;
+      _modsFolder.text = resolved.modsFolder!;
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      backgroundColor: kColorPanel,
+      duration: const Duration(seconds: 3),
+      content: Text(
+        ensure.wasCreated
+            ? 'Game folder resolved (~mods created).'
+            : 'Game folder resolved.',
+        style: const TextStyle(color: kColorCyan, fontFamily: kFontFamily),
+      ),
+    ));
+  }
+
   Future<void> _pickFile(TextEditingController c, String title,
       List<String> exts) async {
     final r = await FilePicker.platform.pickFiles(
@@ -216,19 +257,32 @@ class _SetupDialogState extends ConsumerState<SetupDialog> {
                       : null,
                 ),
                 const SizedBox(height: kSp4),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: OutlinedButton.icon(
-                  onPressed: _autoDetect,
-                  icon: const Icon(Icons.auto_fix_high, size: 16),
-                  label: const Text('AUTO-DETECT'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: kColorCyan,
-                    side: const BorderSide(color: kColorCyan),
-                    shape: const RoundedRectangleBorder(),
-                    visualDensity: VisualDensity.compact,
+              Row(
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _autoDetect,
+                    icon: const Icon(Icons.auto_fix_high, size: 16),
+                    label: const Text('AUTO-DETECT'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: kColorCyan,
+                      side: const BorderSide(color: kColorCyan),
+                      shape: const RoundedRectangleBorder(),
+                      visualDensity: VisualDensity.compact,
+                    ),
                   ),
-                ),
+                  const SizedBox(width: kSp2),
+                  OutlinedButton.icon(
+                    onPressed: _browseGameFolder,
+                    icon: const Icon(Icons.folder_open, size: 16),
+                    label: const Text('BROWSE GAME FOLDER'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: kColorText,
+                      side: const BorderSide(color: kColorBorder),
+                      shape: const RoundedRectangleBorder(),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: kSp4),
               _PathRow(
