@@ -25,6 +25,16 @@ const String _kDescBasePak =
 const String _kDescModsFolder =
     'Where finished builds get installed. Created automatically if missing.';
 
+// Compact-row layout tokens (R1/V*).  Off-grid by design — the redesign
+// brief calls for 6 / 10 / 14 / 28 / 140 which sit between the global
+// 4-pt stops.  Kept private to this file since they only apply here.
+const double _kRowVPad = 6;
+const double _kRowGap = 10;
+const double _kNameMinWidth = 140;     // V2: name never compresses below this
+const double _kPillHeight = 28;
+const double _kStatusSize = 14;
+const double _kSubtleFontSize = 10.5;  // V1 version text + V3 description text
+
 /// Why a path didn't validate — drives the per-row actionable hint
 /// rendering (P8).  `ok` means the path passes; everything else
 /// represents a distinct user-actionable failure mode the hint can
@@ -566,19 +576,18 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                             gameFlashing: _gameFailStreak >= 2,
                           ),
                         ],
-                        const SizedBox(height: kSp4),
                         // ── Section 1: Workshop tools ─────────────────────
+                        // SectionHeader carries its own top/bottom padding;
+                        // PathRow carries its own vertical padding — so no
+                        // SizedBox spacers between them (R1/R2).
                         _SectionHeader(
                           title: 'WORKSHOP TOOLS',
-                          subtitle:
-                              'Bundled with this download. Found inside the unzipped folder.',
                           verified: [
                             _validatePath(_texconv.text, kTexconvBasename).ok,
                             _validatePath(_repak.text, kRepakBasename).ok,
                           ].where((ok) => ok).length,
                           total: 2,
                         ),
-                        const SizedBox(height: kSp2),
                         _PathRow(
                           label: 'texconv',
                           description: _kDescTexconv,
@@ -594,7 +603,6 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                               setState(() => _texconvVersion = v),
                           hintBuilder: (k) => _toolHint(kTexconvBasename, k),
                         ),
-                        const SizedBox(height: kSp3),
                         _PathRow(
                           label: 'repak',
                           description: _kDescRepak,
@@ -609,11 +617,9 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                               setState(() => _repakVersion = v),
                           hintBuilder: (k) => _toolHint(kRepakBasename, k),
                         ),
-                        const SizedBox(height: kSp4),
                         // ── Section 2: Retro Rewind install ───────────────
                         _SectionHeader(
                           title: 'RETRO REWIND INSTALL',
-                          subtitle: 'Where you installed the game on this PC.',
                           verified: [
                             _validatePath(_basePak.text, kBaseGamePakBasename)
                                 .ok,
@@ -624,7 +630,6 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                             onPressed: _browseGameFolder,
                           ),
                         ),
-                        const SizedBox(height: kSp2),
                         _PathRow(
                           label: 'Base game pak',
                           description: _kDescBasePak,
@@ -636,7 +641,6 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                           infoDetector: _formatFileSize,
                           hintBuilder: _basePakHint,
                         ),
-                        const SizedBox(height: kSp3),
                         _PathRow(
                           label: 'Mods folder',
                           description: _kDescModsFolder,
@@ -648,7 +652,7 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                           infoDetector: _summarizeDir,
                           hintBuilder: _modsFolderHint,
                         ),
-                        const SizedBox(height: kSp4),
+                        const SizedBox(height: kSp2),
                         _AdvancedDisclosure(
                           child: CheckboxListTile(
                             value: _devMode,
@@ -722,19 +726,43 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                       ],
                       Tooltip(
                         message: _canSave ? '' : _missingLabel(),
-                        child: ElevatedButton.icon(
-                          onPressed: _canSave && !_saving ? _save : null,
-                          icon: const Icon(Icons.keyboard_return, size: 14),
-                          label: Text(_saving ? 'Saving…' : 'Continue'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: kColorCyan,
-                            foregroundColor: kColorTextInv,
-                            disabledBackgroundColor: kColorDisabled,
-                            disabledForegroundColor: kColorText3,
-                            shape: const RoundedRectangleBorder(),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                        ),
+                        // V4: enabled = solid cyan filled button; disabled =
+                        // dimmed outlined ghost so the disabled state reads
+                        // as "not available" rather than "grey button to
+                        // click".  Two distinct widgets keep each state's
+                        // styling readable.
+                        child: _canSave
+                            ? ElevatedButton.icon(
+                                onPressed: _saving ? null : _save,
+                                icon: const Icon(Icons.keyboard_return,
+                                    size: 14),
+                                label:
+                                    Text(_saving ? 'Saving…' : 'Continue'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: kColorCyan,
+                                  foregroundColor: kColorTextInv,
+                                  shape: const RoundedRectangleBorder(),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                              )
+                            : Opacity(
+                                opacity: 0.35,
+                                child: OutlinedButton.icon(
+                                  onPressed: null,
+                                  icon: const Icon(Icons.keyboard_return,
+                                      size: 14),
+                                  label: const Text('Continue'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: kColorDisabled,
+                                    disabledForegroundColor: kColorDisabled,
+                                    backgroundColor: Colors.transparent,
+                                    side: const BorderSide(
+                                        color: kColorDivider),
+                                    shape: const RoundedRectangleBorder(),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                ),
+                              ),
                       ),
                     ],
                   ),
@@ -784,23 +812,24 @@ class _Header extends StatelessWidget {
 }
 
 /// Section header used by P1 — title in uppercase mono with a counter
-/// pill (X / Y verified) plus a subtitle line below.  Pure layout widget;
-/// the verified count is computed in `_SetupDialogState.build` so it
-/// stays in sync with whatever the rows show.
+/// pill (X / Y verified).  Pure layout widget; the verified count is
+/// computed in `_SetupDialogState.build` so it stays in sync with
+/// whatever the rows show.
 ///
 /// Optional [action] is rendered on the far right of the title row —
 /// P5 uses it to attach the "Pick game folder" button to the
 /// "RETRO REWIND INSTALL" section.
+///
+/// R2: descriptive subtitle removed — the section title plus the X / Y
+/// counter is enough context once each row carries its own ⓘ tooltip.
 class _SectionHeader extends StatelessWidget {
   final String title;
-  final String subtitle;
   final int verified;
   final int total;
   final Widget? action;
 
   const _SectionHeader({
     required this.title,
-    required this.subtitle,
     required this.verified,
     required this.total,
     this.action,
@@ -808,47 +837,38 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                fontFamily: kFontFamily,
-                fontSize: kFsMeta,
-                letterSpacing: 1.8,
-                fontWeight: FontWeight.w600,
-                color: kColorText2,
-              ),
+    return Padding(
+      padding: const EdgeInsets.only(top: 14, bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontFamily: kFontFamily,
+              fontSize: kFsMeta,
+              letterSpacing: 1.8,
+              fontWeight: FontWeight.w600,
+              color: kColorText2,
             ),
-            const SizedBox(width: kSp2),
-            _CounterPill(verified: verified, total: total),
-            if (action != null) ...[
-              const Spacer(),
-              action!,
-            ],
-          ],
-        ),
-        const SizedBox(height: kSp1),
-        Text(
-          subtitle,
-          style: const TextStyle(
-            fontFamily: kFontFamily,
-            fontSize: kFsMeta,
-            color: kColorText3,
           ),
-        ),
-      ],
+          const SizedBox(width: kSp2),
+          _CounterPill(verified: verified, total: total),
+          if (action != null) ...[
+            const Spacer(),
+            action!,
+          ],
+        ],
+      ),
     );
   }
 }
 
-/// `X / Y` mono pill next to a section title.  Cyan when the section is
-/// fully verified, border-grey otherwise.  Flat/sharp — no rounded corners,
-/// no fill (per app_theme.dart's "no shadows, no blur, no gradients" rule).
+/// `X / Y` mono pill next to a section title.  V4: always flat — no
+/// fill, kColorDivider border, kColorText3 text — regardless of state.
+/// The count itself is metadata, not a CTA; the bordered "all good"
+/// look was promoting status info to the cyan = CTA / OK semantic
+/// the design system reserves for actionable affordances.
 class _CounterPill extends StatelessWidget {
   final int verified;
   final int total;
@@ -857,19 +877,17 @@ class _CounterPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final allOk = verified == total;
-    final colour = allOk ? kColorCyan : kColorText3;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: kSp2, vertical: 1),
       decoration: BoxDecoration(
-        border: Border.all(color: allOk ? kColorCyan : kColorBorder),
+        border: Border.all(color: kColorDivider),
       ),
       child: Text(
         '$verified / $total',
-        style: TextStyle(
+        style: const TextStyle(
           fontFamily: kFontFamily,
           fontSize: kFsMeta,
-          color: colour,
+          color: kColorText3,
         ),
       ),
     );
@@ -1023,6 +1041,19 @@ class _PathRowState extends State<_PathRow> {
     widget.onVersionDetected?.call(version);
   }
 
+  /// Manual re-trigger (R1).  Clears the cached version + 'last-detected
+  /// path' guard so `_maybeDetectVersion` runs again, AND calls setState
+  /// so rows without a versionDetector still get a fresh `_validatePath`
+  /// (which re-stats the file).  Tied to the row's ↻ button.
+  void _revalidate() {
+    setState(() {
+      _detectedVersion = null;
+      _detectedFor = null;
+    });
+    widget.onVersionDetected?.call(null);
+    _maybeDetectVersion();
+  }
+
   @override
   Widget build(BuildContext context) {
     final v = _validatePath(widget.controller.text, widget.expectedBasename);
@@ -1032,79 +1063,131 @@ class _PathRowState extends State<_PathRow> {
     final state = widget.controller.text.isEmpty
         ? _StatusKind.empty
         : (v.ok ? _StatusKind.verified : _StatusKind.invalid);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          // Nudge the indicator down so it lines up with the row title
-          // baseline rather than the strict top of the column.
-          padding: const EdgeInsets.only(top: 1),
-          child: _StatusIndicator(state: state),
-        ),
-        const SizedBox(width: kSp2),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    final hint = (!v.ok &&
+            widget.controller.text.isNotEmpty &&
+            widget.hintBuilder != null)
+        ? widget.hintBuilder!(v.kind)
+        : null;
+    // V1: version text recolours to pink when the path itself is invalid
+    // (re-uses pink's existing 'error' role — the layout stays identical).
+    final Color versionColour =
+        state == _StatusKind.invalid ? kColorPink : kColorText3;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: _kRowVPad),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Flexible(
-                    child: Text(
+              _StatusIndicator(state: state),
+              const SizedBox(width: _kRowGap),
+              // V2: ConstrainedBox(minWidth) + Row(MainAxisSize.min) so
+              // the name never compresses.  The block grows when name +
+              // version need more room; the Expanded path pill below
+              // absorbs whatever remains.  No ellipsis on the name —
+              // the path pill is the only column that may truncate.
+              ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: _kNameMinWidth),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Text(
                       widget.label,
                       style: const TextStyle(
                         fontFamily: kFontFamily,
                         fontSize: kFsBody,
                         fontWeight: FontWeight.w700,
                         color: kColorText,
+                        height: 1.0,
                       ),
                     ),
-                  ),
-                  if (pillText != null) ...[
-                    const SizedBox(width: kSp2),
-                    _InfoPill(text: pillText),
+                    if (pillText != null) ...[
+                      const SizedBox(width: 8),
+                      const Text(
+                        '·',
+                        style: TextStyle(
+                          fontFamily: kFontFamily,
+                          fontSize: kFsBody,
+                          color: kColorDisabled,
+                          height: 1.0,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        pillText,
+                        style: TextStyle(
+                          fontFamily: kFontFamily,
+                          fontSize: _kSubtleFontSize,
+                          color: versionColour,
+                          height: 1.0,
+                        ),
+                      ),
+                    ],
                   ],
-                ],
-              ),
-              const SizedBox(height: kSp1),
-              Text(
-                widget.description,
-                style: const TextStyle(
-                  fontFamily: kFontFamily,
-                  fontSize: kFsMeta,
-                  color: kColorText3,
                 ),
               ),
-              const SizedBox(height: kSp2),
-              _PathBreadcrumb(
-                controller: widget.controller,
-                placeholder: widget.expectedBasename == null
-                    ? 'Drop a folder here, or click Browse'
-                    : 'Drop a file here, or click Browse',
-                state: state,
-                onTap: widget.onBrowse,
-                onDropped: (path) {
-                  widget.controller.text = path;
-                },
+              const SizedBox(width: _kRowGap),
+              Expanded(
+                child: _PathBreadcrumb(
+                  controller: widget.controller,
+                  placeholder: widget.expectedBasename == null
+                      ? 'Drop a folder, or click Browse'
+                      : 'Drop a file, or click Browse',
+                  state: state,
+                  onTap: widget.onBrowse,
+                  onDropped: (path) {
+                    widget.controller.text = path;
+                  },
+                ),
               ),
-              if (!v.ok &&
-                  widget.controller.text.isNotEmpty &&
-                  widget.hintBuilder != null)
-                widget.hintBuilder!(v.kind) ?? const SizedBox.shrink(),
+              const SizedBox(width: _kRowGap),
+              _RevalidateButton(onTap: _revalidate),
             ],
           ),
-        ),
-      ],
+          // V3: always-visible description on row 2 — indented under
+          // the name column (status width + gap), single line ellipsis.
+          // Replaces the hover-only ⓘ tooltip that lived here before.
+          Padding(
+            padding: const EdgeInsets.only(
+              left: _kStatusSize + _kRowGap,
+              top: 2,
+            ),
+            child: Text(
+              widget.description,
+              style: const TextStyle(
+                fontFamily: kFontFamily,
+                fontSize: _kSubtleFontSize,
+                color: kColorText3,
+                height: 1.2,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (hint != null)
+            Padding(
+              padding: const EdgeInsets.only(
+                left: _kStatusSize + _kRowGap,
+                top: 3,
+              ),
+              child: hint,
+            ),
+        ],
+      ),
     );
   }
 }
 
 /// Three-state validation indicator shown on the LEFT of each path row
-/// (P2).  Square per the theme's "no rounded corners" rule; the icon
-/// inside conveys the state at a glance:
-///   - verified → cyan fill + dark check
-///   - invalid  → pink fill + dark X
-///   - empty    → transparent fill, grey outline (no icon)
+/// (P2/V5).  Square per the theme's "no rounded corners" rule.  All
+/// states share the same transparent fill so the indicator never reads
+/// as a clickable checkbox — only the border + glyph carry the colour:
+///   - verified → cyan border + cyan check
+///   - invalid  → pink border + pink × glyph
+///   - empty    → grey divider border, no glyph
 enum _StatusKind { verified, invalid, empty }
 
 class _StatusIndicator extends StatelessWidget {
@@ -1113,54 +1196,25 @@ class _StatusIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (Color fill, Color border, IconData? icon, String tip) =
+    final (Color border, IconData? icon, Color iconColour, String tip) =
         switch (state) {
-      _StatusKind.verified => (kColorCyan, kColorCyan, Icons.check, 'Verified'),
-      _StatusKind.invalid => (kColorPink, kColorPink, Icons.close, 'Invalid'),
-      _StatusKind.empty => (Colors.transparent, kColorBorder, null, 'Not set'),
+      _StatusKind.verified =>
+          (kColorCyan, Icons.check, kColorCyan, 'Verified'),
+      _StatusKind.invalid =>
+          (kColorPink, Icons.close, kColorPink, 'Invalid'),
+      _StatusKind.empty => (kColorDivider, null, kColorText3, 'Not set'),
     };
     return Tooltip(
       message: tip,
       child: Container(
-        width: 16,
-        height: 16,
+        width: _kStatusSize,
+        height: _kStatusSize,
         decoration: BoxDecoration(
-          color: fill,
+          color: Colors.transparent,
           border: Border.all(color: border, width: 1),
         ),
         alignment: Alignment.center,
-        child: icon == null
-            ? null
-            : Icon(icon, size: 12, color: kColorTextInv),
-      ),
-    );
-  }
-}
-
-/// Small mono pill rendered next to a row title when verified (P2).
-/// Shows the detected exe version, file size, or directory summary
-/// depending on which detector the row was wired with.  Cyan border +
-/// cyan text on a dark fill — flat/sharp, no rounded corners.
-class _InfoPill extends StatelessWidget {
-  final String text;
-  const _InfoPill({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: kColorSurface,
-        border: Border.all(color: kColorCyan),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          fontFamily: kFontFamily,
-          fontSize: kFsMeta,
-          color: kColorCyan,
-          height: 1.2,
-        ),
+        child: icon == null ? null : Icon(icon, size: 10, color: iconColour),
       ),
     );
   }
@@ -1245,12 +1299,13 @@ class _PathBreadcrumbState extends State<_PathBreadcrumb> {
         if (details.files.isEmpty) return;
         widget.onDropped(details.files.first.path);
       },
-      child: Container(
-        decoration: BoxDecoration(
-          color: kColorSurface,
-          border: Border.all(color: borderColour),
-        ),
-        child: IntrinsicHeight(
+      child: SizedBox(
+        height: _kPillHeight,
+        child: Container(
+          decoration: BoxDecoration(
+            color: kColorSurface,
+            border: Border.all(color: borderColour),
+          ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -1258,19 +1313,23 @@ class _PathBreadcrumbState extends State<_PathBreadcrumb> {
                 child: InkWell(
                   onTap: widget.onTap,
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: kSp2, vertical: kSp2),
-                    child: widget.controller.text.isEmpty
-                        ? Text(
-                            widget.placeholder,
-                            style: const TextStyle(
-                              fontFamily: kFontFamily,
-                              fontSize: kFsBody,
-                              color: kColorText3,
-                              fontStyle: FontStyle.italic,
-                            ),
-                          )
-                        : _buildBreadcrumb(widget.controller.text),
+                    padding: const EdgeInsets.symmetric(horizontal: kSp2),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: widget.controller.text.isEmpty
+                          ? Text(
+                              widget.placeholder,
+                              style: const TextStyle(
+                                fontFamily: kFontFamily,
+                                fontSize: kFsBody,
+                                color: kColorText3,
+                                fontStyle: FontStyle.italic,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                            )
+                          : _buildBreadcrumb(widget.controller.text),
+                    ),
                   ),
                 ),
               ),
@@ -1278,12 +1337,11 @@ class _PathBreadcrumbState extends State<_PathBreadcrumb> {
               InkWell(
                 onTap: widget.onTap,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: kSp2, vertical: kSp2),
+                  padding: const EdgeInsets.symmetric(horizontal: kSp2),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: const [
-                      Icon(Icons.folder_open, size: 14, color: kColorText2),
+                      Icon(Icons.folder_open, size: 13, color: kColorText2),
                       SizedBox(width: kSp1),
                       Text(
                         'Browse',
@@ -1617,18 +1675,20 @@ class _AutoDetectHero extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(kSp3),
       decoration: BoxDecoration(
-        color: kColorSurface,
+        // V4: bg matches the surrounding dialog panel so the banner
+        // reads as a recessed surface, not a popped card.
+        color: kColorPanel,
         border: Border.all(color: kColorCyan),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // 36×36 icon block — flat panel with cyan outline + cyan sparkle.
+          // 36×36 icon block — V4: no fill, just the 1px cyan border.
           Container(
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: kColorPanel,
+              color: Colors.transparent,
               border: Border.all(color: kColorCyan),
             ),
             alignment: Alignment.center,
@@ -1766,40 +1826,68 @@ class _ActionableHint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: kSp1),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    // Single-line, no outer padding — the parent _PathRow already
+    // indents and spaces this hint to align under the name column.
+    return Text.rich(
+      TextSpan(
+        style: const TextStyle(
+          fontFamily: kFontFamily,
+          fontSize: kFsMeta,
+          color: kColorPink,
+          height: 1.3,
+        ),
         children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 2),
-            child: Icon(Icons.close, size: 12, color: kColorPink),
-          ),
-          const SizedBox(width: kSp1),
-          Expanded(
-            child: Text.rich(
-              TextSpan(
-                style: const TextStyle(
-                  fontFamily: kFontFamily,
-                  fontSize: kFsMeta,
-                  color: kColorPink,
-                ),
-                children: [
-                  TextSpan(text: text),
-                  if (action != null)
-                    WidgetSpan(
-                      alignment: PlaceholderAlignment.middle,
-                      child: _HintLink(
-                        label: action!.label,
-                        onTap: action!.callback,
-                      ),
-                    ),
-                  if (tail != null) TextSpan(text: tail),
-                ],
+          const TextSpan(text: '× '),
+          TextSpan(text: text),
+          if (action != null)
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: _HintLink(
+                label: action!.label,
+                onTap: action!.callback,
+              ),
+            ),
+          if (tail != null) TextSpan(text: tail),
+        ],
+      ),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+}
+
+/// Per-row revalidate action (R1).  28×28 square ghost button to the
+/// right of the path pill — clicking it clears the cached version
+/// string and re-runs the version detector / file-stat check so the
+/// row reflects on-disk state without forcing a Browse round-trip.
+class _RevalidateButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _RevalidateButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Re-validate',
+      child: SizedBox(
+        width: _kPillHeight,
+        height: _kPillHeight,
+        child: Material(
+          color: kColorSurface,
+          child: InkWell(
+            onTap: onTap,
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: kColorBorder),
+              ),
+              alignment: Alignment.center,
+              child: const Icon(
+                Icons.refresh,
+                size: 14,
+                color: kColorText2,
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
