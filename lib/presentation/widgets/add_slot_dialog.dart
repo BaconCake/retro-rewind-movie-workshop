@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/focus_bloom.dart';
+import '../../core/widgets/primary_button.dart';
 import '../../domain/custom_slot_naming.dart';
 import '../../domain/sku.dart';
 import '../providers/providers.dart';
@@ -147,17 +149,19 @@ class _AddSlotDialogState extends ConsumerState<AddSlotDialog> {
               _CapacityHint(genre: _genre),
               const SizedBox(height: kSp3),
               _Label('TITLE'),
-              TextField(
-                controller: _titleCtrl,
-                autofocus: true,
-                maxLength: 50,
-                enabled: !_busy,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  counterText: '',
+              FocusBloom(
+                child: TextField(
+                  controller: _titleCtrl,
+                  autofocus: true,
+                  maxLength: 50,
+                  enabled: !_busy,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    counterText: '',
+                  ),
+                  style: const TextStyle(fontSize: kFsBody, color: kColorText),
+                  onSubmitted: (_) => _submit(),
                 ),
-                style: const TextStyle(fontSize: kFsBody, color: kColorText),
-                onSubmitted: (_) => _submit(),
               ),
               const SizedBox(height: kSp3),
               _Label('STAR RATING'),
@@ -207,7 +211,7 @@ class _AddSlotDialogState extends ConsumerState<AddSlotDialog> {
                   const SizedBox(width: kSp2),
                   Expanded(
                     flex: 2,
-                    child: FilledButton.icon(
+                    child: PrimaryButton(
                       onPressed: _busy ? null : _submit,
                       icon: _busy
                           ? const SizedBox(
@@ -217,7 +221,7 @@ class _AddSlotDialogState extends ConsumerState<AddSlotDialog> {
                                   strokeWidth: 2),
                             )
                           : const Icon(Icons.check, size: 16),
-                      label: Text(_busy ? 'ADDING…' : 'ADD SLOT'),
+                      label: _busy ? 'ADDING…' : 'ADD SLOT',
                     ),
                   ),
                 ],

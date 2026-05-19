@@ -17,6 +17,7 @@ dependencies:
   file_picker: ^8.1.2
   desktop_drop: ^0.5.0
   pasteboard: ^0.3.0
+  google_fonts: ^6.1.0
 
 dev_dependencies:
   flutter_test:

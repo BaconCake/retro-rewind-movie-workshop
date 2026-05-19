@@ -5,6 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/theme/bloom.dart';
+import '../../core/widgets/atmosphere.dart';
+import '../../core/widgets/status_pill.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
@@ -13,7 +16,6 @@ import '../providers/providers.dart';
 import 'add_nr_slot_dialog.dart';
 import 'add_slot_dialog.dart';
 import 'cover_image.dart';
-import 'slot_status_badge.dart';
 import 'sort_header_bar.dart';
 
 /// Shelf of custom slot cards for the active tab (left column of the
@@ -281,7 +283,7 @@ class _DashedBorderPainter extends CustomPainter {
   bool shouldRepaint(covariant _DashedBorderPainter old) => old.color != color;
 }
 
-class _SlotCard extends StatelessWidget {
+class _SlotCard extends StatefulWidget {
   final SlotData slot;
   final TextureReplacement? replacement;
   final bool selected;
@@ -299,98 +301,242 @@ class _SlotCard extends StatelessWidget {
   });
 
   @override
+  State<_SlotCard> createState() => _SlotCardState();
+}
+
+class _SlotCardState extends State<_SlotCard> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
-    final hasImage = replacement != null;
-    // Selection trumps customization: cyan when selected, pink when there's
-    // a user image, neutral border for plain placeholders.
-    final borderColor = selected
-        ? kColorCyan
-        : hasImage
-            ? kColorPink
-            : kColorBorder;
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          color: kColorPanel,
-          border: Border.all(
-            color: borderColor,
-            width: selected ? 2 : 1,
-          ),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+    final hasImage = widget.replacement != null;
+    final selected = widget.selected;
+
+    // LN-6 bullet 1: genre stripe accent.  Resolved off the bkg texture
+    // name so the colour follows the slot's actual genre rather than the
+    // currently-selected tab (matters on "All Movies" where one shelf
+    // mixes every genre).  Falls back to cyan for Adventure / unknowns.
+    final genre = parseGenreFromTextureName(widget.slot.bkgTex);
+    final Color accent = genre != null
+        ? (kGenreAccent[genre.name] ?? kColorCyan)
+        : kColorCyan;
+
+    // Border colour cascade (LN-6 bullet 4 keeps hover non-glowing):
+    //   selected   → cyan + selection bloom
+    //   hasImage   → pink (preserves the "you've replaced this" signal)
+    //   hover      → kColorText3 (one tier brighter than divider)
+    //   default    → kColorBorder
+    final Color borderColour;
+    if (selected) {
+      borderColour = kColorCyan;
+    } else if (hasImage) {
+      borderColour = kColorPink;
+    } else if (_hover) {
+      borderColour = kColorText3;
+    } else {
+      borderColour = kColorBorder;
+    }
+
+    // LN-6 bullet 3: selection halo — 1px outer outline via spread:1 +
+    // 20px soft outer glow.  Stays single-card thanks to single-select
+    // semantics, so the bloom budget rule isn't violated by a busy shelf.
+    final List<BoxShadow>? selectionShadows = selected
+        ? [
+            BoxShadow(
+              color: kColorCyan.withValues(alpha: 0.35),
+              blurRadius: 0,
+              spreadRadius: 1,
+            ),
+            BoxShadow(
+              color: kColorCyan.withValues(alpha: 0.25),
+              blurRadius: 20,
+            ),
+          ]
+        : null;
+
+    // Subtle hover lift via background swap — kColorElevated (LN-1 token)
+    // is one M3 tier above kColorPanel.  Doesn't glow, doesn't compete
+    // with the selection cyan, just nudges the card forward visually.
+    final cardBg =
+        (_hover && !selected) ? kColorElevated : kColorPanel;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        // Outer Stack uses Clip.none so the selection glow + the genre
+        // stripe glow can bleed past the card edges.
+        child: Stack(
+          clipBehavior: Clip.none,
           children: [
-            Expanded(
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: _Thumbnail(
-                      replacement: replacement,
-                      layout: slot.ls,
-                    ),
-                  ),
-                  // Status badge floats in the upper-right.  Wrapped in a
-                  // tiny dark plate so the amber/red text stays readable
-                  // over both bright covers and the dim placeholder bg.
-                  if (isEdited || !isShipped)
-                    Positioned(
-                      top: kSp1,
-                      right: kSp1,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4, vertical: 1),
-                        color: kColorBg.withValues(alpha: 0.78),
-                        child: SlotStatusBadge(
-                          isEdited: isEdited,
-                          isShipped: isShipped,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
+            // Card body — clips its own children so the cover and label
+            // can't escape the border.  Shadows live on this decoration
+            // because the outer Stack lets them paint freely.
             Container(
-              padding: const EdgeInsets.fromLTRB(kSp2, kSp1, kSp2, kSp2),
-              decoration: const BoxDecoration(
-                color: kColorPanel,
-                border: Border(top: BorderSide(color: kColorBorder)),
+              decoration: BoxDecoration(
+                color: cardBg,
+                border: Border.all(color: borderColour, width: 1),
+                boxShadow: selectionShadows,
               ),
+              clipBehavior: Clip.antiAlias,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    slot.pnName.isEmpty ? '(untitled)' : slot.pnName,
-                    style: const TextStyle(
-                      fontSize: kFsMeta,
-                      fontWeight: FontWeight.w700,
-                      color: kColorText,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    slot.bkgTex,
-                    style: const TextStyle(
-                      fontSize: kFsMeta,
-                      color: kColorText3,
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: _Thumbnail(
+                            replacement: widget.replacement,
+                            layout: widget.slot.ls,
+                          ),
+                        ),
+                        // LN-6 bullet 5: CRT scanline veil over the cover.
+                        const Positioned.fill(
+                          child: ScanlineOverlay(intensity: 0.04),
+                        ),
+                      ],
                     ),
                   ),
-                  if (slot.sku != 0)
-                    Text(
-                      'SKU ${slot.sku}',
-                      style: const TextStyle(
-                        fontSize: kFsMeta,
-                        color: kColorText3,
-                      ),
+                  Container(
+                    padding: const EdgeInsets.fromLTRB(
+                        kSp2, kSp1, kSp2, kSp2),
+                    // No fill — the outer card colour shows through, so
+                    // hover lift covers both the cover backdrop and the
+                    // label strip in one stroke.
+                    decoration: const BoxDecoration(
+                      border: Border(
+                          top: BorderSide(color: kColorBorder)),
                     ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          widget.slot.pnName.isEmpty
+                              ? '(untitled)'
+                              : widget.slot.pnName,
+                          style: const TextStyle(
+                            fontSize: kFsMeta,
+                            fontWeight: FontWeight.w700,
+                            color: kColorText,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.slot.bkgTex,
+                          style: const TextStyle(
+                            fontSize: kFsMeta,
+                            color: kColorText3,
+                          ),
+                        ),
+                        if (widget.slot.sku != 0)
+                          Text(
+                            'SKU ${widget.slot.sku}',
+                            style: const TextStyle(
+                              fontSize: kFsMeta,
+                              color: kColorText3,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
+            // LN-6 bullet 1: 3px genre stripe at the left edge with a
+            // 6px outer glow.  Lives in the outer Stack so its glow
+            // bleeds past the card border rather than getting clipped.
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 3,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: accent,
+                    boxShadow: [
+                      BoxShadow(
+                        color: accent.withValues(alpha: 0.6),
+                        blurRadius: 6,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            // LN-6 bullet 2: status corner ribbon (top-right).
+            // EDITED carries an amber bloom; UNSHIPPED rests without
+            // glow — the resting state should not contribute to the
+            // bloom budget.
+            if (widget.isEdited || !widget.isShipped)
+              Positioned(
+                top: 0,
+                right: 0,
+                child: _StatusRibbon(
+                  isEdited: widget.isEdited,
+                  isShipped: widget.isShipped,
+                ),
+              ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// LN-6 corner ribbon — top-right status badge for slot cards.  Three
+/// states share one widget so the visual language stays consistent:
+///   - UNSHIPPED (never built):    dark-red, no bloom (resting)
+///   - EDITED   (built then changed): amber, amber bloom (advisory)
+///   - SHIPPED & clean: returns SizedBox.shrink (no ribbon — default OK
+///     state shouldn't add visual noise to a busy shelf).
+class _StatusRibbon extends StatelessWidget {
+  final bool isEdited;
+  final bool isShipped;
+  const _StatusRibbon({required this.isEdited, required this.isShipped});
+
+  @override
+  Widget build(BuildContext context) {
+    final String label;
+    final Color color;
+    final Color textColour;
+    final bool glow;
+    if (!isShipped) {
+      label = 'UNSHIPPED';
+      color = kColorBadgeUnshipped;
+      // White text on dark-red — kColorTextInv (#050505) would sit at
+      // near-zero contrast against the dark-red fill.
+      textColour = kColorText;
+      glow = false;
+    } else {
+      // isEdited && isShipped (the SlotCard already filters out the
+      // shipped-and-clean case before instantiating us).
+      label = 'EDITED';
+      color = kColorWarn;
+      textColour = kColorTextInv;
+      glow = true;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color,
+        boxShadow: glow ? bloomSoft(color) : null,
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontFamily: kFontFamily,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          color: textColour,
+          letterSpacing: 1.0,
+          height: 1.2,
         ),
       ),
     );
@@ -729,7 +875,7 @@ class _NrSlotRowState extends State<_NrSlotRow> {
               ),
               if (widget.isEdited || !widget.isShipped) ...[
                 const SizedBox(width: kSp2),
-                SlotStatusBadge(
+                SlotStatusPill(
                   isEdited: widget.isEdited,
                   isShipped: widget.isShipped,
                 ),

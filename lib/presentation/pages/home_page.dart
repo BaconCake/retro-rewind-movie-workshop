@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/atmosphere.dart';
+import '../../core/widgets/brand_wordmark.dart';
 import '../providers/providers.dart';
 import '../widgets/clear_all_dialog.dart';
 import '../widgets/cover_drop_paste_zone.dart';
@@ -82,8 +84,13 @@ class _HomePageState extends ConsumerState<HomePage> {
       _maybeShowSetupOnLaunch();
     });
     return Scaffold(
+      // LN-4: scaffold bg transparent so the AmbientBackground washes
+      // (pink/cyan radial gradients + scanline veil) are visible
+      // through the body.  Without this the Scaffold paints kColorBg
+      // over the ambient layer.
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
-        title: const _Wordmark(),
+        title: const BrandWordmark(),
         actions: [
           IconButton(
             tooltip: 'Open setup dialog',
@@ -110,33 +117,40 @@ class _HomePageState extends ConsumerState<HomePage> {
       // so the shortcut works regardless of which widget currently has
       // keyboard focus — pasteClipboardImageToActiveSlot itself bails
       // out when a TextField is focused so text paste still works.
-      body: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
-              pasteClipboardImageToActiveSlot(ref, context),
-          const SingleActivator(LogicalKeyboardKey.keyV, meta: true): () =>
-              pasteClipboardImageToActiveSlot(ref, context),
-        },
-        // FocusScope under the shortcuts so they're always considered
-        // active for the home page subtree.  autofocus makes the chord
-        // resolve without the user having to click anywhere first.
-        child: Focus(
-          autofocus: true,
-          child: Column(
-            children: const [
-              GenreTabBar(),
-              Expanded(
-                child: Row(
-                  children: [
-                    SizedBox(width: 420, child: TextureGrid()),
-                    VerticalDivider(width: 1),
-                    Expanded(child: SlotPreview()),
-                    VerticalDivider(width: 1),
-                    SlotOptionsPanel(),
-                  ],
+      //
+      // LN-4: AmbientBackground sits between Scaffold and the app body —
+      // washes + scanlines paint behind every screen surface.  Widgets
+      // with their own opaque colour cover the wash; the gap between
+      // panels is where the ambient layer reads.
+      body: AmbientBackground(
+        child: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
+                pasteClipboardImageToActiveSlot(ref, context),
+            const SingleActivator(LogicalKeyboardKey.keyV, meta: true): () =>
+                pasteClipboardImageToActiveSlot(ref, context),
+          },
+          // FocusScope under the shortcuts so they're always considered
+          // active for the home page subtree.  autofocus makes the chord
+          // resolve without the user having to click anywhere first.
+          child: Focus(
+            autofocus: true,
+            child: Column(
+              children: const [
+                GenreTabBar(),
+                Expanded(
+                  child: Row(
+                    children: [
+                      SizedBox(width: 420, child: TextureGrid()),
+                      VerticalDivider(width: 1),
+                      Expanded(child: SlotPreview()),
+                      VerticalDivider(width: 1),
+                      SlotOptionsPanel(),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -144,31 +158,3 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 }
 
-/// "📼 RETRO REWIND VHS" wordmark, mirroring Python's top-bar logo
-/// (RR_VHS_Tool.py:7279-7286).  Pink "RETRO REWIND" + cyan "VHS" — the only
-/// place in the app where two accent colours sit side by side.
-class _Wordmark extends StatelessWidget {
-  const _Wordmark();
-
-  @override
-  Widget build(BuildContext context) {
-    const titleStyle = TextStyle(
-      fontFamily: kFontFamily,
-      fontFamilyFallback: kFontFamilyFallback,
-      fontSize: kFsApp,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 1.5,
-    );
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Text('📼', style: TextStyle(fontSize: 18)),
-        const SizedBox(width: kSp2),
-        Text('RETRO REWIND',
-            style: titleStyle.copyWith(color: kColorPink)),
-        const SizedBox(width: kSp1),
-        Text('VHS', style: titleStyle.copyWith(color: kColorCyan)),
-      ],
-    );
-  }
-}

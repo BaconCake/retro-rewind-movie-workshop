@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/genres.dart';
 import '../../core/constants/standee_zones.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/atmosphere.dart';
 import '../../data/services/cover_actions.dart';
 import '../providers/providers.dart';
 import 'cover_image.dart';
@@ -340,6 +341,15 @@ class _CroppingPreviewState extends State<CroppingPreview> {
           // the cropper either.
           clipBehavior: Clip.none,
           children: [
+            // LN-10 (revised): CRT scanlines sit BEHIND the cover image
+            // — visible in letterboxes / before an image is set, hidden
+            // when the cover fills the canvas.  User reported the
+            // earlier on-top placement read as red lines painted over
+            // the image (pink ambient wash + white scanlines combine
+            // visually) and confused the cropping interaction.
+            const Positioned.fill(
+              child: ScanlineOverlay(intensity: 0.04, spacing: 3),
+            ),
             Listener(
               onPointerSignal: (e) => _onScroll(e, size),
               onPointerDown: (e) => _onPointerDown(e, size),

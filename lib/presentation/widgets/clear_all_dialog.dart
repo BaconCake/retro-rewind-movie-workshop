@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/focus_bloom.dart';
+import '../../core/widgets/primary_button.dart';
 import '../providers/providers.dart';
 
 /// Typed-confirmation dialog for wiping the entire custom library.
@@ -136,36 +138,39 @@ class _ClearAllDialogState extends ConsumerState<ClearAllDialog> {
             style: const TextStyle(color: kColorText2),
           ),
           const SizedBox(height: kSp2),
-          TextField(
-            controller: _inputCtrl,
-            autofocus: true,
-            keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            textInputAction: TextInputAction.done,
-            onChanged: (_) => setState(() {}),
-            onSubmitted: (_) => _onConfirm(),
-            style: const TextStyle(
-              color: kColorText,
-              fontFamily: kFontFamily,
-              fontFamilyFallback: kFontFamilyFallback,
-            ),
-            decoration: InputDecoration(
-              isDense: true,
-              hintText: '$_total',
-              hintStyle: const TextStyle(color: kColorText3),
-              filled: true,
-              fillColor: kColorSurface,
-              border: const OutlineInputBorder(
-                borderRadius: BorderRadius.zero,
-                borderSide: BorderSide(color: kColorBorder),
+          FocusBloom(
+            color: kColorPink,
+            child: TextField(
+              controller: _inputCtrl,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              textInputAction: TextInputAction.done,
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) => _onConfirm(),
+              style: const TextStyle(
+                color: kColorText,
+                fontFamily: kFontFamily,
+                fontFamilyFallback: kFontFamilyFallback,
               ),
-              enabledBorder: const OutlineInputBorder(
-                borderRadius: BorderRadius.zero,
-                borderSide: BorderSide(color: kColorBorder),
-              ),
-              focusedBorder: const OutlineInputBorder(
-                borderRadius: BorderRadius.zero,
-                borderSide: BorderSide(color: kColorPink),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: '$_total',
+                hintStyle: const TextStyle(color: kColorText3),
+                filled: true,
+                fillColor: kColorSurface,
+                border: const OutlineInputBorder(
+                  borderRadius: BorderRadius.zero,
+                  borderSide: BorderSide(color: kColorBorder),
+                ),
+                enabledBorder: const OutlineInputBorder(
+                  borderRadius: BorderRadius.zero,
+                  borderSide: BorderSide(color: kColorBorder),
+                ),
+                focusedBorder: const OutlineInputBorder(
+                  borderRadius: BorderRadius.zero,
+                  borderSide: BorderSide(color: kColorPink),
+                ),
               ),
             ),
           ),
@@ -176,16 +181,10 @@ class _ClearAllDialogState extends ConsumerState<ClearAllDialog> {
           onPressed: _busy ? null : () => Navigator.of(context).pop(false),
           child: const Text('CANCEL'),
         ),
-        FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: kColorPink,
-            foregroundColor: kColorTextInv,
-            disabledBackgroundColor: kColorDisabled,
-            disabledForegroundColor: kColorText3,
-            shape: const RoundedRectangleBorder(),
-          ),
+        PrimaryButton.destructive(
           onPressed: (_matches && !_busy) ? _onConfirm : null,
-          child: const Text('DELETE'),
+          label: 'DELETE',
+          compact: true,
         ),
       ],
     );

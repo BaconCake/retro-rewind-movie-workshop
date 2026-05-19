@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/primary_button.dart';
 import '../../data/services/setup_autodetect.dart';
 import '../../domain/entities/app_config.dart';
 import '../providers/providers.dart';
@@ -726,43 +727,16 @@ class _SetupDialogState extends ConsumerState<SetupDialog>
                       ],
                       Tooltip(
                         message: _canSave ? '' : _missingLabel(),
-                        // V4: enabled = solid cyan filled button; disabled =
-                        // dimmed outlined ghost so the disabled state reads
-                        // as "not available" rather than "grey button to
-                        // click".  Two distinct widgets keep each state's
-                        // styling readable.
-                        child: _canSave
-                            ? ElevatedButton.icon(
-                                onPressed: _saving ? null : _save,
-                                icon: const Icon(Icons.keyboard_return,
-                                    size: 14),
-                                label:
-                                    Text(_saving ? 'Saving…' : 'Continue'),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: kColorCyan,
-                                  foregroundColor: kColorTextInv,
-                                  shape: const RoundedRectangleBorder(),
-                                  visualDensity: VisualDensity.compact,
-                                ),
-                              )
-                            : Opacity(
-                                opacity: 0.35,
-                                child: OutlinedButton.icon(
-                                  onPressed: null,
-                                  icon: const Icon(Icons.keyboard_return,
-                                      size: 14),
-                                  label: const Text('Continue'),
-                                  style: OutlinedButton.styleFrom(
-                                    foregroundColor: kColorDisabled,
-                                    disabledForegroundColor: kColorDisabled,
-                                    backgroundColor: Colors.transparent,
-                                    side: const BorderSide(
-                                        color: kColorDivider),
-                                    shape: const RoundedRectangleBorder(),
-                                    visualDensity: VisualDensity.compact,
-                                  ),
-                                ),
-                              ),
+                        // LN-7: PrimaryButton handles enabled/disabled
+                        // visual split internally (filled cyan + bloom
+                        // on hover when enabled; outlined ghost at 0.35
+                        // opacity when disabled).
+                        child: PrimaryButton(
+                          onPressed: _canSave && !_saving ? _save : null,
+                          icon: const Icon(Icons.keyboard_return, size: 14),
+                          label: _saving ? 'Saving…' : 'Continue',
+                          compact: true,
+                        ),
                       ),
                     ],
                   ),

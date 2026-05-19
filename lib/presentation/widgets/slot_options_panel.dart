@@ -6,6 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/genres.dart';
 import '../../core/constants/new_release.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/status_pill.dart';
+import '../../core/widgets/focus_bloom.dart';
+import '../../core/widgets/phosphor_build_log.dart';
+import '../../core/widgets/primary_button.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/nr_slot_logic.dart';
@@ -13,7 +17,6 @@ import '../../domain/repositories/pak_builder.dart' show BuildProgress;
 import '../../domain/sku.dart';
 import '../providers/providers.dart';
 import 'rarity_picker.dart';
-import 'slot_status_badge.dart';
 import 'star_rating_picker.dart';
 
 /// Right-hand operations column.
@@ -74,7 +77,7 @@ class _SlotOptionsHeader extends ConsumerWidget {
       children: [
         const _SectionHeader('SLOT OPTIONS'),
         if (trackingKey != null)
-          SlotStatusBadge(
+          SlotStatusPill(
             isEdited: tracking.edited.contains(trackingKey),
             isShipped: tracking.shipped.contains(trackingKey),
           ),
@@ -376,14 +379,10 @@ class _DeleteSlotLinkState extends ConsumerState<_DeleteSlotLink> {
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('CANCEL'),
           ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: kColorPink,
-              foregroundColor: kColorTextInv,
-              shape: const RoundedRectangleBorder(),
-            ),
+          PrimaryButton.destructive(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('DELETE'),
+            label: 'DELETE',
+            compact: true,
           ),
         ],
       ),
@@ -518,12 +517,14 @@ class _SlotTextFieldState extends State<_SlotTextField> {
   Widget build(BuildContext context) {
     return _FieldShell(
       label: widget.label,
-      child: TextField(
-        controller: _ctrl,
-        decoration: const InputDecoration(isDense: true),
-        style: const TextStyle(fontSize: kFsBody, color: kColorText),
-        onSubmitted: (_) => _commit(),
-        onTapOutside: (_) => _commit(),
+      child: FocusBloom(
+        child: TextField(
+          controller: _ctrl,
+          decoration: const InputDecoration(isDense: true),
+          style: const TextStyle(fontSize: kFsBody, color: kColorText),
+          onSubmitted: (_) => _commit(),
+          onTapOutside: (_) => _commit(),
+        ),
       ),
     );
   }
@@ -730,7 +731,10 @@ class _BuildSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        FilledButton.icon(
+        // LN-7: PrimaryButton — bloom on hover, darken on press,
+        // outlined-ghost when running so the user gets a clear
+        // "I'm busy, hands off" cue without the button looking dead.
+        PrimaryButton(
           onPressed: state.isRunning ? null : controller.ship,
           icon: state.isRunning
               ? const SizedBox(
@@ -742,15 +746,13 @@ class _BuildSection extends ConsumerWidget {
                   state.lastBuildSucceeded
                       ? Icons.check_circle_outline
                       : Icons.local_shipping_outlined,
-                  size: 18),
-          label: Text(
-            state.isRunning
-                ? 'BUILDING...'
-                : state.lastBuildSucceeded
-                    ? 'SHIP AGAIN'
-                    : 'SHIP TO STORE',
-            style: const TextStyle(letterSpacing: 1.5),
-          ),
+                  size: 18,
+                ),
+          label: state.isRunning
+              ? 'BUILDING...'
+              : state.lastBuildSucceeded
+                  ? 'SHIP AGAIN'
+                  : 'SHIP TO STORE',
         ),
         if (state.isRunning && state.progress != null) ...[
           const SizedBox(height: kSp2),
@@ -797,28 +799,13 @@ class _BuildSection extends ConsumerWidget {
           ],
         ),
         const SizedBox(height: kSp1),
+        // LN-9: phosphor-terminal styled log surface — warm-black bg,
+        // amber/lime/pink text with per-line bloom, scanline veil.
         SizedBox(
           height: 180,
-          child: Container(
-            decoration: BoxDecoration(
-              color: kColorBg,
-              border: Border.all(color: kColorBorder),
-            ),
-            padding: const EdgeInsets.all(kSp2),
-            child: ListView.builder(
-              itemCount: state.log.length,
-              itemBuilder: (context, i) {
-                final line = state.log[i];
-                return Text(
-                  line,
-                  style: TextStyle(
-                    fontSize: kFsMeta,
-                    color: _logLineColor(line),
-                    height: 1.3,
-                  ),
-                );
-              },
-            ),
+          child: PhosphorBuildLog(
+            lines: state.log,
+            running: state.isRunning,
           ),
         ),
         if (state.lastErrorCode != null) ...[
@@ -839,20 +826,6 @@ class _BuildSection extends ConsumerWidget {
     );
   }
 
-  Color _logLineColor(String line) {
-    final l = line.toUpperCase();
-    if (l.contains('FAIL') || l.contains('ERROR') || l.contains('[E0')) {
-      return kColorPink;
-    }
-    if (l.contains(' OK') ||
-        l.contains('INJECT ') ||
-        l.contains('PLACEHOLDER ') ||
-        l.contains('SUCCEEDED') ||
-        l.contains('INSTALLED')) {
-      return kColorCyan;
-    }
-    return kColorText2;
-  }
 }
 
 /// Determinate progress bar shown while a build is running.  Each unit
@@ -1269,14 +1242,10 @@ class _DeleteNrLinkState extends ConsumerState<_DeleteNrLink> {
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('CANCEL'),
           ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: kColorPink,
-              foregroundColor: kColorTextInv,
-              shape: const RoundedRectangleBorder(),
-            ),
+          PrimaryButton.destructive(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('DELETE'),
+            label: 'DELETE',
+            compact: true,
           ),
         ],
       ),
