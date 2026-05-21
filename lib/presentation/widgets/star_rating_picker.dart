@@ -92,6 +92,12 @@ class _StarRatingPickerState extends State<StarRatingPicker> {
   }
 }
 
+/// Filled-star gold and empty-star grey, exported so the read-only
+/// [MiniStarRow] used in slot cards renders in the same palette as the
+/// interactive picker.
+const Color kStarGold = Color(0xFFF5A623);
+const Color kStarEmpty = Color(0xFF444444);
+
 class _StarRowPainter extends CustomPainter {
   final double committed;
   final double? hover;
@@ -103,8 +109,8 @@ class _StarRowPainter extends CustomPainter {
     required this.cellCount,
   });
 
-  static const _gold = Color(0xFFF5A623);
-  static const _empty = Color(0xFF444444);
+  static const _gold = kStarGold;
+  static const _empty = kStarEmpty;
   static const _preview = Color(0xFF66E0F0);
 
   @override
@@ -228,4 +234,98 @@ class _CriticBadge extends StatelessWidget {
     if (stars <= 1.5) return ('BAD CRITIC', const Color(0xFFFF3030));
     return ('', kColorText3);
   }
+}
+
+/// Read-only 5-star row used in slot cards.  Renders the actual rating as
+/// gold (with half-star clipping), and the remaining stars as flat grey
+/// so the row always shows five star outlines regardless of value.
+/// Non-interactive — taps fall through.
+class MiniStarRow extends StatelessWidget {
+  /// Half-star value in [0.0, 5.0].  3.0 is a legal rating here even
+  /// though the picker forbids it — `MiniStarRow` only displays.
+  final double stars;
+
+  /// Diameter of a single star.  The widget sizes itself to
+  /// `5 * starSize` plus four 1px gaps.
+  final double starSize;
+
+  const MiniStarRow({
+    super.key,
+    required this.stars,
+    this.starSize = 11,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: starSize * 5 + 4,
+      height: starSize,
+      child: CustomPaint(
+        painter: _MiniStarRowPainter(stars: stars, starSize: starSize),
+      ),
+    );
+  }
+}
+
+class _MiniStarRowPainter extends CustomPainter {
+  final double stars;
+  final double starSize;
+  _MiniStarRowPainter({required this.stars, required this.starSize});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = starSize / 2;
+    final cy = size.height / 2;
+    for (var i = 1; i <= 5; i++) {
+      final cx = (i - 1) * (starSize + 1) + r;
+      Color leftFill, rightFill;
+      if (stars >= i) {
+        leftFill = kStarGold;
+        rightFill = kStarGold;
+      } else if (stars >= i - 0.5) {
+        leftFill = kStarGold;
+        rightFill = kStarEmpty;
+      } else {
+        leftFill = kStarEmpty;
+        rightFill = kStarEmpty;
+      }
+      _paintHalfStar(canvas, Offset(cx, cy), r,
+          leftFill: leftFill, rightFill: rightFill);
+    }
+  }
+
+  void _paintHalfStar(Canvas canvas, Offset c, double r,
+      {required Color leftFill, required Color rightFill}) {
+    final path = _starPath(c, r);
+    canvas.save();
+    canvas.clipRect(Rect.fromLTRB(c.dx - r, c.dy - r, c.dx, c.dy + r));
+    canvas.drawPath(path, Paint()..color = leftFill);
+    canvas.restore();
+    canvas.save();
+    canvas.clipRect(Rect.fromLTRB(c.dx, c.dy - r, c.dx + r, c.dy + r));
+    canvas.drawPath(path, Paint()..color = rightFill);
+    canvas.restore();
+  }
+
+  Path _starPath(Offset c, double r) {
+    final innerR = r * 0.40;
+    final path = Path();
+    for (var i = 0; i < 10; i++) {
+      final radius = i.isEven ? r : innerR;
+      final theta = -math.pi / 2 + i * (math.pi / 5);
+      final x = c.dx + radius * math.cos(theta);
+      final y = c.dy + radius * math.sin(theta);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    path.close();
+    return path;
+  }
+
+  @override
+  bool shouldRepaint(covariant _MiniStarRowPainter old) =>
+      old.stars != stars || old.starSize != starSize;
 }

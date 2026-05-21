@@ -5,18 +5,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/genres.dart';
 import '../../core/theme/app_theme.dart';
-import '../../core/theme/bloom.dart';
 import '../../core/widgets/atmosphere.dart';
 import '../../core/widgets/status_pill.dart';
 import '../../data/datatable/slot_data.dart';
 import '../../domain/entities/new_release_slot.dart';
 import '../../domain/entities/texture_replacement.dart';
+import '../../domain/sku.dart';
 import '../../domain/sort.dart';
 import '../providers/providers.dart';
 import 'add_nr_slot_dialog.dart';
 import 'add_slot_dialog.dart';
 import 'cover_image.dart';
 import 'sort_header_bar.dart';
+import 'star_rating_picker.dart';
 
 /// Shelf of custom slot cards for the active tab (left column of the
 /// 3-column main layout — mirrors Python's "shelf" panel
@@ -177,6 +178,10 @@ class _SlotGrid extends ConsumerWidget {
             selected: slot.bkgTex == selectedBkg,
             isEdited: edited.contains(slot.bkgTex),
             isShipped: shipped.contains(slot.bkgTex),
+            // Genre stripe is only meaningful on "All Movies" where one
+            // shelf mixes every genre; on a single-genre tab the stripe
+            // would just be a redundant column of one colour.
+            showGenreStripe: tab == 'All Movies',
             onTap: () => ref.read(selectedSlotBkgProvider.notifier).state =
                 slot.bkgTex,
           ),
@@ -289,6 +294,7 @@ class _SlotCard extends StatefulWidget {
   final bool selected;
   final bool isEdited;
   final bool isShipped;
+  final bool showGenreStripe;
   final VoidCallback onTap;
 
   const _SlotCard({
@@ -297,6 +303,7 @@ class _SlotCard extends StatefulWidget {
     required this.onTap,
     required this.isEdited,
     required this.isShipped,
+    required this.showGenreStripe,
     this.replacement,
   });
 
@@ -309,28 +316,31 @@ class _SlotCardState extends State<_SlotCard> {
 
   @override
   Widget build(BuildContext context) {
-    final hasImage = widget.replacement != null;
     final selected = widget.selected;
 
     // LN-6 bullet 1: genre stripe accent.  Resolved off the bkg texture
     // name so the colour follows the slot's actual genre rather than the
     // currently-selected tab (matters on "All Movies" where one shelf
     // mixes every genre).  Falls back to cyan for Adventure / unknowns.
+    // Only rendered when [showGenreStripe] is true (i.e. on "All Movies"),
+    // since on a single-genre tab the stripe is the same colour for
+    // every card and conveys no information.
     final genre = parseGenreFromTextureName(widget.slot.bkgTex);
     final Color accent = genre != null
         ? (kGenreAccent[genre.name] ?? kColorCyan)
         : kColorCyan;
 
-    // Border colour cascade (LN-6 bullet 4 keeps hover non-glowing):
-    //   selected   → cyan + selection bloom
-    //   hasImage   → pink (preserves the "you've replaced this" signal)
-    //   hover      → kColorText3 (one tier brighter than divider)
-    //   default    → kColorBorder
+    // Border colour cascade:
+    //   selected → cyan + selection bloom
+    //   hover    → kColorText3 (one tier brighter than divider)
+    //   default  → kColorBorder
+    // The previous "hasImage → pink" branch was dropped: the pink border
+    // doubled the signal that a slot has user art (the cover thumbnail
+    // already shows that) while painting every replaced card with a loud
+    // ring at shelf scale.
     final Color borderColour;
     if (selected) {
       borderColour = kColorCyan;
-    } else if (hasImage) {
-      borderColour = kColorPink;
     } else if (_hover) {
       borderColour = kColorText3;
     } else {
@@ -426,22 +436,34 @@ class _SlotCardState extends State<_SlotCard> {
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(height: 2),
-                        Text(
-                          widget.slot.bkgTex,
-                          style: const TextStyle(
-                            fontSize: kFsMeta,
-                            color: kColorText3,
-                          ),
+                        const SizedBox(height: 4),
+                        // Stars on their own row.
+                        MiniStarRow(
+                          stars: skuToInfo(widget.slot.sku).stars,
+                          starSize: 10,
                         ),
-                        if (widget.slot.sku != 0)
-                          Text(
-                            'SKU ${widget.slot.sku}',
-                            style: const TextStyle(
-                              fontSize: kFsMeta,
-                              color: kColorText3,
+                        // Reserved-height pill row directly below.  At
+                        // shelf scale the card content area is only
+                        // ~110px wide (3 cols inside a 420px shelf), so
+                        // putting the pill side-by-side with the stars
+                        // overflows.  Stacking vertically also makes
+                        // "stars never in the pill's space" trivially
+                        // true.  The SizedBox keeps the row at constant
+                        // height so the cover area doesn't jitter when
+                        // a slot's status changes between Edited /
+                        // Unshipped / shipped-clean.
+                        const SizedBox(height: 4),
+                        SizedBox(
+                          height: 16,
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: SlotStatusPill(
+                              isEdited: widget.isEdited,
+                              isShipped: widget.isShipped,
+                              compact: true,
                             ),
                           ),
+                        ),
                       ],
                     ),
                   ),
@@ -451,92 +473,29 @@ class _SlotCardState extends State<_SlotCard> {
             // LN-6 bullet 1: 3px genre stripe at the left edge with a
             // 6px outer glow.  Lives in the outer Stack so its glow
             // bleeds past the card border rather than getting clipped.
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 3,
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: accent,
-                    boxShadow: [
-                      BoxShadow(
-                        color: accent.withValues(alpha: 0.6),
-                        blurRadius: 6,
-                      ),
-                    ],
+            // Only shown in the "All Movies" tab — on a per-genre tab
+            // every stripe would be the same colour and convey nothing.
+            if (widget.showGenreStripe)
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                width: 3,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: accent,
+                      boxShadow: [
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.6),
+                          blurRadius: 6,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            // LN-6 bullet 2: status corner ribbon (top-right).
-            // EDITED carries an amber bloom; UNSHIPPED rests without
-            // glow — the resting state should not contribute to the
-            // bloom budget.
-            if (widget.isEdited || !widget.isShipped)
-              Positioned(
-                top: 0,
-                right: 0,
-                child: _StatusRibbon(
-                  isEdited: widget.isEdited,
-                  isShipped: widget.isShipped,
-                ),
-              ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// LN-6 corner ribbon — top-right status badge for slot cards.  Three
-/// states share one widget so the visual language stays consistent:
-///   - UNSHIPPED (never built):    dark-red, no bloom (resting)
-///   - EDITED   (built then changed): amber, amber bloom (advisory)
-///   - SHIPPED & clean: returns SizedBox.shrink (no ribbon — default OK
-///     state shouldn't add visual noise to a busy shelf).
-class _StatusRibbon extends StatelessWidget {
-  final bool isEdited;
-  final bool isShipped;
-  const _StatusRibbon({required this.isEdited, required this.isShipped});
-
-  @override
-  Widget build(BuildContext context) {
-    final String label;
-    final Color color;
-    final Color textColour;
-    final bool glow;
-    if (!isShipped) {
-      label = 'UNSHIPPED';
-      color = kColorBadgeUnshipped;
-      // White text on dark-red — kColorTextInv (#050505) would sit at
-      // near-zero contrast against the dark-red fill.
-      textColour = kColorText;
-      glow = false;
-    } else {
-      // isEdited && isShipped (the SlotCard already filters out the
-      // shipped-and-clean case before instantiating us).
-      label = 'EDITED';
-      color = kColorWarn;
-      textColour = kColorTextInv;
-      glow = true;
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        color: color,
-        boxShadow: glow ? bloomSoft(color) : null,
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontFamily: kFontFamily,
-          fontSize: 9,
-          fontWeight: FontWeight.w700,
-          color: textColour,
-          letterSpacing: 1.0,
-          height: 1.2,
         ),
       ),
     );
